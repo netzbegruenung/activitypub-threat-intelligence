@@ -1,0 +1,15 @@
+[package]
+name = "apti-core"
+description = "AP-TI data model, normalisation and effective-expiry engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+idna = "1"
+ipnet = "2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

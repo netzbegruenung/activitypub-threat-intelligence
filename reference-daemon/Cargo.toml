@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/apti-core", "crates/aptid", "crates/apti-tui", "crates/apti-fail2ban"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+# RSA key generation and SQLite are very slow unoptimised; optimise
+# dependencies in dev/test builds.
+[profile.dev.package."*"]
+opt-level = 2
+
+[workspace.dependencies]
+apti-core = { path = "crates/apti-core" }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

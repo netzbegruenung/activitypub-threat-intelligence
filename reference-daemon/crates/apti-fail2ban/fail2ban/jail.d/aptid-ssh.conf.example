@@ -1,0 +1,21 @@
+# Ban IPs from the aptid active list (written by `apti-fail2ban pull`).
+#
+# Every line is a ban (maxretry = 1). Lines for still-active IPs are re-written
+# every `refresh_secs`, so bantime must be larger than
+# refresh_secs + interval_secs of the [pull] section. With the defaults
+# (1800 + 300 s) a bantime of 3600 s keeps bans continuous; after an entry
+# expires in aptid the ban lapses within one bantime.
+#
+# Add this jail to `ignore_jails` in apti-fail2ban's [push] section.
+
+[aptid-ssh]
+enabled  = true
+filter   = apti
+logpath  = /var/log/apti-fail2ban/ssh.log
+backend  = polling
+port     = ssh
+maxretry = 1
+findtime = 3600
+bantime  = 3600
+# Do not let bantime.increment grow imported bans.
+bantime.increment = false

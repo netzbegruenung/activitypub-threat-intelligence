@@ -1,0 +1,58 @@
+# apti-fail2ban example configuration.
+
+[aptid]
+# aptid internal REST API ([api].bind in the aptid config).
+url = "http://127.0.0.1:8081"
+# Token with scope "push" (needed by `push`).
+push_token = "change-me-sensors-0123456789"
+# Token with scope "read" (needed by `pull`). Its max_tlp limits what is banned.
+read_token = "change-me-firewall-0123456789"
+timeout_secs = 20
+
+# ---------------------------------------------------------------- push
+# Follow the fail2ban log and report bans as observations.
+[push]
+# fail2ban's logtarget (fail2ban.conf / fail2ban.local).
+log = "/var/log/fail2ban.log"
+# Read position, saved after each accepted batch.
+state_file = "/var/lib/apti-fail2ban/push.state"
+batch_interval_secs = 30
+poll_interval_ms = 1000
+# IMPORTANT: never report the jails fed by `pull`, otherwise bans imported
+# from peers are re-published as your own Sightings (feedback loop).
+ignore_jails = ["aptid-ssh"]
+# "Restore Ban" lines are re-applied bans after a fail2ban restart.
+report_restored = false
+# Behaviour for jails not listed below; leave unset to skip them.
+# default_behavior = "other"
+max_queue = 10000
+
+[push.jails.sshd]
+behavior = "ssh-bruteforce"
+port = 22
+service = "ssh"
+
+[push.jails.postfix-sasl]
+behavior = "auth-bruteforce"
+service = "smtp"
+
+[push.jails.dovecot]
+behavior = "auth-bruteforce"
+service = "imap"
+
+# ---------------------------------------------------------------- pull
+# Write active IPs to files that fail2ban follows (filter.d/apti.conf).
+[pull]
+interval_secs = 300
+# Re-write still-active IPs after this long. The jail's bantime must be
+# larger than refresh_secs + interval_secs, otherwise bans lapse briefly.
+refresh_secs = 1800
+
+[[pull.output]]
+path = "/var/log/apti-fail2ban/ssh.log"
+# Empty = all behaviours.
+behaviors = ["ssh-bruteforce", "auth-bruteforce", "scan"]
+types = ["ipv4-addr", "ipv6-addr"]
+# Optional: only entries whose evidence reported this port.
+# port = 22
+max_size_bytes = 10485760

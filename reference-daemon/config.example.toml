@@ -1,0 +1,122 @@
+# aptid example configuration.
+#
+# This file holds bootstrap settings and policy *defaults*. Policy edited at
+# runtime with apti-tui (trust, weights, k/T/M, TLP) is stored in the
+# database and takes precedence over the values below.
+
+[instance]
+# Public base URL of the ActivityPub endpoints (terminate TLS in a reverse
+# proxy and forward the Host header unchanged).
+base_url = "https://ti.example.net"
+# WebFinger handle: feed@ti.example.net
+username = "feed"
+name = "Example Org threat feed"
+# Name of the Organization actor served at <base_url>/org (Section 3.2).
+organization = "Example Org"
+# Contact for removal requests (Section 11).
+contact = "abuse@example.net"
+
+[storage]
+database = "/var/lib/aptid/aptid.sqlite"
+# RSA key of the Service actor; generated on first start (mode 0600).
+key_file = "/var/lib/aptid/actor.pem"
+
+[public]
+# ActivityPub listener (behind the reverse proxy).
+bind = "127.0.0.1:8080"
+max_body_bytes = 4194304
+
+[api]
+# Organisation-internal REST API. Never expose it to the Internet.
+bind = "127.0.0.1:8081"
+
+[[api.tokens]]
+name = "sensors"
+token = "change-me-sensors-0123456789"
+scopes = ["push"]
+
+[[api.tokens]]
+name = "firewall"
+token = "change-me-firewall-0123456789"
+scopes = ["read"]
+# Most restrictive TLP this client may receive.
+max_tlp = "amber"
+
+[[api.tokens]]
+name = "automation"
+token = "change-me-automation-0123456789"
+# "allowlist": manage local allowlist entries;
+# "publish": additionally create/remove published (federated) entries.
+scopes = ["read", "allowlist"]
+
+[control]
+# Management socket for apti-tui. Peers are checked with SO_PEERCRED:
+# the daemon's own uid and root are always allowed.
+socket = "/run/aptid/control.sock"
+mode = "0660"
+allowed_uids = []
+allowed_gids = []
+
+[federation]
+# Allow plain-HTTP peers (development only).
+allow_http = false
+request_timeout_secs = 20
+# Incremental pull of followed actors' activeObjects.
+sync_interval_secs = 900
+# Full resync (Section 5.3: at least weekly).
+full_resync_interval_secs = 604800
+delivery_max_attempts = 12
+inbox_rate_per_minute = 120
+signature_max_age_secs = 43200
+
+[publish]
+# Local observations are batched into Sightings at this interval (5-15 min).
+batch_interval_secs = 300
+# Default TLP for published evidence (Section 11: green or stricter for
+# scan / brute force / spam / DDoS sources).
+default_tlp = "green"
+manually_approves_followers = true
+# Keep Tombstones in activeObjects (Section 5.3: at least 180 days).
+tombstone_days = 180
+
+[policy]
+# Sighting activation threshold k(b): a number or "off".
+default_k = 2
+# Weight of this organisation's own Sightings (always trusted).
+# Equal to k means local sensors alone can list an observable.
+local_weight = 2
+min_v4_prefix = 24
+min_v6_prefix = 48
+reject_special_purpose = true
+# Accept RFC 5737 / RFC 3849 / RFC 2606 documentation values (demos only).
+allow_documentation_ranges = false
+# High-impact benign infrastructure that is never listed (Section 10).
+# Domains cover their subdomains.
+allowlist = [
+  "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9",
+  "2606:4700:4700::1111", "2001:4860:4860::8888",
+]
+# Delete records of inactive observables after this many days (Section 11).
+retention_days = 30
+recompute_interval_secs = 300
+
+# Per-behaviour overrides of k, T (ttl_secs), M (max_age_secs) and the TLP
+# used when publishing Sightings of this behaviour.
+[policy.behavior.ssh-bruteforce]
+k = 2
+tlp = "green"
+
+[policy.behavior.command-and-control]
+k = "off"
+
+# Bootstrap trust per operator (Section 7). Operators are Organization actor
+# URLs (verified operator link) or "domain:<registrable domain>".
+[[policy.operator]]
+id = "https://partner.example.org/org"
+trusted = true
+weight = 1
+
+[[policy.operator]]
+id = "https://partner.example.org/org"
+behavior = "smtp-spam"
+trusted = false

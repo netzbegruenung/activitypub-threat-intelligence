@@ -1,0 +1,16 @@
+[package]
+name = "apti-tui"
+description = "Terminal UI for the AP-TI reference daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apti-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm = "0.28"
+ratatui = "0.29"
+serde_json.workspace = true
