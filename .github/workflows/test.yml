@@ -1,0 +1,32 @@
+# Runs the full test suite for every pull request, every push to main and
+# on manual trigger. Mirrors .woodpecker/test.yaml.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    container: rust:1.85-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add rustfmt
+      - working-directory: reference-daemon
+        run: cargo fmt --all --check
+
+  test:
+    runs-on: ubuntu-latest
+    container: rust:1.85-bookworm
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - working-directory: reference-daemon
+        run: cargo test --workspace --locked

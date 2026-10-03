@@ -1,0 +1,73 @@
+# Builds release binaries when a tag vYYYY.MM.N or vYYYY.MM.NN is pushed and
+# attaches them to a GitHub release. Each binary is uploaded as an individual
+# artifact; example configs and fail2ban files are bundled in a separate
+# tarball. The tagged commit must be part of the main branch.
+# Mirrors .woodpecker/release.yaml.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9]'
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  verify-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: echo "$TAG" | grep -Eq '^v[0-9]{4}\.(0[1-9]|1[0-2])\.[0-9]{1,2}$'
+      - run: git fetch origin main:refs/remotes/origin/main
+      - run: git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+
+  test:
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    container: rust:1.85-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - working-directory: reference-daemon
+        run: cargo test --workspace --locked
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    container: rust:1.85-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - working-directory: reference-daemon
+        run: |
+          cargo build --workspace --release --locked
+          mkdir -p ../dist ../config-pkg
+          for bin in aptid apti-tui apti-fail2ban; do cp "target/release/$bin" "../dist/$bin-$TAG-linux-x86_64"; done
+          cp config.example.toml crates/apti-fail2ban/apti-fail2ban.example.toml ../config-pkg/
+          cp -r crates/apti-fail2ban/fail2ban ../config-pkg/
+          tar -czf "../dist/aptid-config-$TAG.tar.gz" -C ../config-pkg .
+          cd ../dist && sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --verify-tag
