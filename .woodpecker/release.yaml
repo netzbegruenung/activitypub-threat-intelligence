@@ -1,6 +1,7 @@
 # Builds release binaries when a tag vYYYY.MM.N or vYYYY.MM.NN is pushed and
-# attaches them to a Forgejo release. The tagged commit must be part of the
-# main branch.
+# attaches them to a Forgejo release. Each binary is uploaded as an individual
+# artifact; example configs and fail2ban files are bundled in a separate
+# tarball. The tagged commit must be part of the main branch.
 #
 # Required repository secret: forgejo_token (API token with write access to
 # releases). Adjust base_url below to your Forgejo instance.
@@ -29,12 +30,12 @@ steps:
     commands:
       - cd reference-daemon
       - cargo build --workspace --release --locked
-      - mkdir -p ../dist/pkg
-      - cp target/release/aptid target/release/apti-tui target/release/apti-fail2ban ../dist/pkg/
-      - cp config.example.toml crates/apti-fail2ban/apti-fail2ban.example.toml ../dist/pkg/
-      - cp -r crates/apti-fail2ban/fail2ban ../dist/pkg/
-      - tar -czf "../dist/aptid-$CI_COMMIT_TAG-linux-x86_64.tar.gz" -C ../dist/pkg .
-      - cd ../dist && sha256sum "aptid-$CI_COMMIT_TAG-linux-x86_64.tar.gz" > SHA256SUMS
+      - mkdir -p ../dist ../config-pkg
+      - for bin in aptid apti-tui apti-fail2ban; do cp "target/release/$$bin" "../dist/$$bin-$CI_COMMIT_TAG-linux-x86_64"; done
+      - cp config.example.toml crates/apti-fail2ban/apti-fail2ban.example.toml ../config-pkg/
+      - cp -r crates/apti-fail2ban/fail2ban ../config-pkg/
+      - tar -czf "../dist/aptid-config-$CI_COMMIT_TAG.tar.gz" -C ../config-pkg .
+      - cd ../dist && sha256sum * > SHA256SUMS
 
   - name: release
     image: woodpeckerci/plugin-release
@@ -44,6 +45,5 @@ steps:
       api_key:
         from_secret: forgejo_token
       files:
-        - dist/aptid-*.tar.gz
-        - dist/SHA256SUMS
+        - dist/*
       title: ${CI_COMMIT_TAG}
