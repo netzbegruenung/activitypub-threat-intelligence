@@ -1,6 +1,10 @@
-# Runs the full test suite for every pull request.
+# Runs the full test suite for every pull request, every push to main and
+# on manual trigger.
 when:
   - event: pull_request
+  - event: push
+    branch: main
+  - event: manual
 
 steps:
   - name: fmt
