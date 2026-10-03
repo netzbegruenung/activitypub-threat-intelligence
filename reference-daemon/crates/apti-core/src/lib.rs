@@ -1,5 +1,5 @@
 //! Core types and algorithms for the ActivityPub Threat Intelligence profile
-//! (AP-TI, draft-seeberg-activitypub-threatintel-00).
+//! (AP-TI, draft-activitypub-threatintel-00).
 //!
 //! This crate is free of I/O. It contains the data model (Section 4),
 //! observable normalisation (Section 4.1), consumer policy and the

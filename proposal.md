@@ -1,7 +1,7 @@
 # ActivityPub Threat Intelligence Profile (AP-TI)
 
-**draft-seeberg-activitypub-threatintel-00**
-Author: S. Seeberg · Intended status: Experimental · October 2026
+**draft-activitypub-threatintel-00**
+Intended status: Experimental · October 2026
 
 ## Abstract
 

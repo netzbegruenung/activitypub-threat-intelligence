@@ -1,7 +1,7 @@
 # AP-TI reference daemon
 
 Reference implementation of the *ActivityPub Threat Intelligence Profile*
-([`../proposal.md`](../proposal.md), draft-seeberg-activitypub-threatintel-00).
+([`../proposal.md`](../proposal.md), draft-activitypub-threatintel-00).
 
 It follows the deployment model of Appendix D. The workspace contains three crates:
 
