@@ -3,11 +3,11 @@
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Datelike, TimeDelta, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::normalize::{self, NormError};
-use crate::FUTURE_TOLERANCE_SECS;
+use crate::{FUTURE_TOLERANCE_SECS, MAX_YEAR, MIN_YEAR};
 
 /// `observableType` (Section 4.1). Unknown types deserialise to `Unknown`
 /// so that consumers can ignore them instead of failing the whole activity.
@@ -360,6 +360,10 @@ pub enum ValidationError {
     IncludeSubdomains,
     #[error("evidence is dated more than 5 minutes in the future")]
     Future,
+    #[error("timestamp outside the years {MIN_YEAR}..={MAX_YEAR}")]
+    DateRange,
+    #[error("`{0}` contains control characters")]
+    ControlCharacters(&'static str),
 }
 
 impl EvidenceObject {
@@ -375,7 +379,20 @@ impl EvidenceObject {
     /// End of validity of an Opinion (default `published` + 90 d).
     pub fn opinion_valid_until(&self) -> DateTime<Utc> {
         self.valid_until
-            .unwrap_or(self.published + TimeDelta::days(90))
+            .unwrap_or_else(|| crate::saturating_add(self.published, TimeDelta::days(90)))
+    }
+
+    fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+        [
+            Some(self.published),
+            self.updated,
+            self.valid_from,
+            self.valid_until,
+            self.first_seen,
+            self.last_seen,
+        ]
+        .into_iter()
+        .flatten()
     }
 
     /// Whether this object applies to behaviour `b`. Opinions without
@@ -406,6 +423,43 @@ impl EvidenceObject {
         if self.tlp == Tlp::Red {
             return Err(ValidationError::TlpRed);
         }
+        // Remote strings end up in logs and terminal UIs; control characters
+        // would allow escape-sequence injection there.
+        let control = |s: &str| s.chars().any(char::is_control);
+        let fields: [(&'static str, bool); 6] = [
+            ("id", control(&self.id)),
+            ("attributedTo", control(&self.attributed_to)),
+            (
+                "summary",
+                self.summary
+                    .as_deref()
+                    .is_some_and(|s| s.chars().any(|c| c.is_control() && c != '\n')),
+            ),
+            ("service", self.service.as_deref().is_some_and(control)),
+            (
+                "indicatorRefs",
+                self.indicator_refs.iter().any(|r| control(r)),
+            ),
+            (
+                "infrastructureTypes",
+                self.infrastructure_types.iter().any(|t| control(t)),
+            ),
+        ];
+        if let Some((name, _)) = fields.iter().find(|(_, bad)| *bad) {
+            return Err(ValidationError::ControlCharacters(name));
+        }
+        if self
+            .timestamps()
+            .any(|t| !(MIN_YEAR..=MAX_YEAR).contains(&t.year()))
+        {
+            return Err(ValidationError::DateRange);
+        }
+        // `published`/`updated` are the base of every expiry computation
+        // (Section 7); future values would extend the evidence's lifetime.
+        let future = now + TimeDelta::seconds(FUTURE_TOLERANCE_SECS);
+        if self.published > future || self.updated.is_some_and(|u| u > future) {
+            return Err(ValidationError::Future);
+        }
         let has_observable = self.observable_type.is_some() || self.observable_value.is_some();
         if has_observable || self.kind != EvidenceKind::Opinion {
             let ty = self
@@ -423,7 +477,6 @@ impl EvidenceObject {
                 return Err(ValidationError::IncludeSubdomains);
             }
         }
-        let future = now + TimeDelta::seconds(FUTURE_TOLERANCE_SECS);
         match self.kind {
             EvidenceKind::ThreatIndicator => {
                 if self.observed_behavior.is_empty() {
@@ -456,7 +509,7 @@ impl EvidenceObject {
                 if self.count == Some(0) {
                     return Err(ValidationError::Count);
                 }
-                if last > future || self.published > future {
+                if last > future {
                     return Err(ValidationError::Future);
                 }
             }
@@ -466,9 +519,6 @@ impl EvidenceObject {
                 }
                 if self.opinion.is_none() {
                     return Err(ValidationError::Missing("opinion"));
-                }
-                if self.published > future {
-                    return Err(ValidationError::Future);
                 }
             }
         }
@@ -576,5 +626,54 @@ mod tests {
 
         o.observable_type = Some(ObservableType::Unknown);
         assert_eq!(o.validate(now, &p), Err(ValidationError::UnknownType));
+        o.observable_type = Some(ObservableType::Ipv4Addr);
+
+        o.id = "https://a.example/s/\u{1b}]0;x\u{7}".into();
+        assert_eq!(
+            o.validate(now, &p),
+            Err(ValidationError::ControlCharacters("id"))
+        );
+        o.id = "https://a.example/s/1".into();
+        o.summary = Some("two\nlines".into());
+        o.validate(now, &p).unwrap();
+        o.summary = Some("\u{9b}31m".into());
+        assert_eq!(
+            o.validate(now, &p),
+            Err(ValidationError::ControlCharacters("summary"))
+        );
+    }
+
+    /// Extended years parse but overflow date arithmetic in the engine.
+    #[test]
+    fn rejects_out_of_range_and_future_dates() {
+        let now: DateTime<Utc> = "2026-10-03T10:00:00Z".parse().unwrap();
+        let p = NormPolicy::default();
+        let indicator = |published: &str, until: &str| -> EvidenceObject {
+            serde_json::from_str(&format!(
+                r#"{{"type":"ThreatIndicator","id":"https://a.example/i/1",
+                  "attributedTo":"https://a.example/actor","published":"{published}",
+                  "observableType":"ipv4-addr","observableValue":"8.8.4.4",
+                  "observedBehavior":"scan","validFrom":"2026-10-01T00:00:00Z",
+                  "validUntil":"{until}","tlp":"clear"}}"#
+            ))
+            .unwrap()
+        };
+        let ok = indicator("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z");
+        ok.validate(now, &p).unwrap();
+        assert_eq!(
+            indicator("+262142-12-31T00:00:00Z", "2026-10-02T00:00:00Z").validate(now, &p),
+            Err(ValidationError::DateRange)
+        );
+        assert_eq!(
+            indicator("2026-10-01T00:00:00Z", "+262142-12-31T00:00:00Z").validate(now, &p),
+            Err(ValidationError::DateRange)
+        );
+        assert_eq!(
+            indicator("2030-01-01T00:00:00Z", "2031-01-01T00:00:00Z").validate(now, &p),
+            Err(ValidationError::Future)
+        );
+        let mut updated = ok.clone();
+        updated.updated = Some(now + TimeDelta::days(1));
+        assert_eq!(updated.validate(now, &p), Err(ValidationError::Future));
     }
 }

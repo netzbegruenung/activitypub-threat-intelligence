@@ -1,14 +1,14 @@
 //! Periodic recomputation of the active list (Sections 7, 9) and the review
 //! queue, plus retention cleanup (Section 11).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use apti_core::expiry::{self, Assessment, ScoredEvidence};
 use apti_core::normalize::{self, NormPolicy};
 use apti_core::policy::{BehaviorOverride, OperatorPolicy, PolicySet};
 use apti_core::protocol::AllowlistEntry;
-use apti_core::{Behavior, EvidenceKind, EvidenceObject, ObservableType, Tlp};
+use apti_core::{saturating_add, Behavior, EvidenceKind, EvidenceObject, ObservableType, Tlp};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::client;
@@ -157,6 +157,22 @@ pub fn evaluate(
             _ => {}
         }
     }
+    // Index opinions so that each observable only looks at the opinions that
+    // can apply to it; scanning all opinions per observable is quadratic in
+    // the amount of remote evidence (Section 10, resource exhaustion).
+    let mut opinions_by_value: HashMap<(ObservableType, &str), Vec<usize>> = HashMap::new();
+    let mut opinions_by_ref: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, o) in opinions.iter().enumerate() {
+        if let (Some(ty), Some(v)) = (
+            o.object.observable_type,
+            o.object.observable_value.as_deref(),
+        ) {
+            opinions_by_value.entry((ty, v)).or_default().push(i);
+        }
+        for r in &o.object.indicator_refs {
+            opinions_by_ref.entry(r.as_str()).or_default().push(i);
+        }
+    }
     let mut out = Vec::new();
     for ((ty, value), items) in groups {
         let indicator_ids: HashSet<&str> = items
@@ -165,21 +181,18 @@ pub fn evaluate(
             .map(|e| e.object.id.as_str())
             .collect();
         let mut candidates: Vec<ScoredEvidence> = items.into_iter().cloned().collect();
-        for o in &opinions {
-            let by_value = o.object.observable_type == Some(ty)
-                && o.object
-                    .observable_value
-                    .as_deref()
-                    .is_some_and(|c| normalize::covers(ty, c, value, false));
-            let by_ref = o
-                .object
-                .indicator_refs
-                .iter()
-                .any(|r| indicator_ids.contains(r.as_str()));
-            if by_value || by_ref {
-                candidates.push((*o).clone());
+        let mut matched = BTreeSet::new();
+        for c in normalize::covering_values(ty, value) {
+            if let Some(ix) = opinions_by_value.get(&(ty, c.as_str())) {
+                matched.extend(ix.iter().copied());
             }
         }
+        for id in &indicator_ids {
+            if let Some(ix) = opinions_by_ref.get(id) {
+                matched.extend(ix.iter().copied());
+            }
+        }
+        candidates.extend(matched.into_iter().map(|i| (*opinions[i]).clone()));
         for mut a in expiry::assess_all(ty, value, &candidates, policy, now) {
             if allow.covers(ty, value, Some(a.behavior)) {
                 a.allowlisted = true;
@@ -209,10 +222,11 @@ fn relevant_until(o: &EvidenceObject, policy: &PolicySet) -> DateTime<Utc> {
         .max()
         .unwrap_or(TimeDelta::days(180));
     match o.kind {
-        EvidenceKind::ThreatIndicator => {
-            o.valid_until.unwrap_or(o.published).min(o.base() + max_age)
-        }
-        EvidenceKind::Sighting => o.last_seen.unwrap_or(o.published) + max_age,
+        EvidenceKind::ThreatIndicator => o
+            .valid_until
+            .unwrap_or(o.published)
+            .min(saturating_add(o.base(), max_age)),
+        EvidenceKind::Sighting => saturating_add(o.last_seen.unwrap_or(o.published), max_age),
         EvidenceKind::Opinion => o.opinion_valid_until(),
     }
 }
@@ -239,7 +253,10 @@ pub async fn recompute(state: &AppState) -> anyhow::Result<usize> {
     let retention = TimeDelta::days(state.cfg.policy.retention_days);
     let stale: Vec<String> = evidence
         .iter()
-        .filter(|o| o.attributed_to != local_actor && relevant_until(o, &policy) + retention < now)
+        .filter(|o| {
+            o.attributed_to != local_actor
+                && saturating_add(relevant_until(o, &policy), retention) < now
+        })
         .map(|o| o.id.clone())
         .collect();
     let stale_set: HashSet<&String> = stale.iter().collect();

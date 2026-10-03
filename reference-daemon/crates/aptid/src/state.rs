@@ -84,11 +84,14 @@ pub type Shared = Arc<AppState>;
 
 impl AppState {
     pub fn new(cfg: Config, db: Db, keys: Keys) -> anyhow::Result<Self> {
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder()
             .user_agent(concat!("aptid/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(cfg.federation.request_timeout_secs))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+            .redirect(reqwest::redirect::Policy::none());
+        if !cfg.federation.allow_private_addresses {
+            http = http.dns_resolver(Arc::new(crate::client::PublicResolver));
+        }
+        let http = http.build()?;
         Ok(Self {
             urls: Urls::new(&cfg),
             cfg,

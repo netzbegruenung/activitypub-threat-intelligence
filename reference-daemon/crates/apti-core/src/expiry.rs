@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Behavior, EvidenceKind, EvidenceObject, ObservableType, Tlp};
 use crate::normalize;
 use crate::policy::{PolicySet, Threshold};
-use crate::FUTURE_TOLERANCE_SECS;
+use crate::{saturating_add, FUTURE_TOLERANCE_SECS};
 
 /// An evidence object together with the operator it is attributed to.
 #[derive(Debug, Clone)]
@@ -140,7 +140,7 @@ pub fn assess(
                 if o.is_revoked() || from > now {
                     continue;
                 }
-                let end = until.min(o.base() + max_age);
+                let end = until.min(saturating_add(o.base(), max_age));
                 e_ind = Some(e_ind.map_or(end, |x| x.max(end)));
                 if now < end {
                     supports = true;
@@ -154,7 +154,7 @@ pub fn assess(
                 }
                 let entry = last.entry(e.operator.as_str()).or_insert(seen);
                 *entry = (*entry).max(seen);
-                if seen + ttl > now {
+                if saturating_add(seen, ttl) > now {
                     supports = true;
                 }
             }
@@ -200,7 +200,7 @@ pub fn assess(
                     break;
                 }
             }
-            l.map(|l| l + ttl.min(max_age))
+            l.map(|l| saturating_add(l, ttl.min(max_age)))
         }
     };
 
@@ -361,6 +361,22 @@ mod tests {
             p,
             now,
         )
+    }
+
+    /// Objects stored before date validation existed must not panic.
+    #[test]
+    fn extreme_dates_do_not_overflow() {
+        let p = trusting(&[("a", 1.0)]);
+        let max = DateTime::<Utc>::MAX_UTC;
+        let a = run(
+            &[
+                indicator("a", "i1", max, t("01T00:00:00"), max),
+                sighting("a", "s1", max),
+            ],
+            &p,
+            t("03T11:00:00"),
+        );
+        assert_eq!(a.e_ind, Some(max));
     }
 
     #[test]

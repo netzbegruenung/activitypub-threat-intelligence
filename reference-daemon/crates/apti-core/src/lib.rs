@@ -14,6 +14,8 @@ pub mod protocol;
 
 pub use model::{Behavior, EvidenceKind, EvidenceObject, ObservableType, OpinionValue, Tlp};
 
+use chrono::{DateTime, TimeDelta, Utc};
+
 /// JSON-LD context URI of the AP-TI vocabulary (placeholder, Section 12).
 pub const TI_CONTEXT: &str = "https://example.org/ns/ti";
 /// ActivityStreams context URI.
@@ -24,6 +26,20 @@ pub const AS_PUBLIC: &str = "https://www.w3.org/ns/activitystreams#Public";
 pub const MAX_BATCH: usize = 1000;
 /// Clock skew tolerance for future-dated evidence (Section 7).
 pub const FUTURE_TOLERANCE_SECS: i64 = 300;
+
+/// Range of calendar years accepted in evidence timestamps. chrono parses
+/// extended years far beyond what date arithmetic can handle.
+pub const MIN_YEAR: i32 = 1970;
+pub const MAX_YEAR: i32 = 9999;
+
+/// `t + d`, clamped to the representable range instead of panicking.
+pub fn saturating_add(t: DateTime<Utc>, d: TimeDelta) -> DateTime<Utc> {
+    t.checked_add_signed(d).unwrap_or(if d < TimeDelta::zero() {
+        DateTime::<Utc>::MIN_UTC
+    } else {
+        DateTime::<Utc>::MAX_UTC
+    })
+}
 
 /// The `@context` value used on all AP-TI documents.
 pub fn context() -> serde_json::Value {

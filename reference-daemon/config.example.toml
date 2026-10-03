@@ -60,14 +60,26 @@ allowed_gids = []
 [federation]
 # Allow plain-HTTP peers (development only).
 allow_http = false
+# Allow requests to loopback, private and other special-purpose addresses
+# (development only). When false, remote hosts must resolve to public
+# addresses; this also applies to an HTTP(S) proxy set via the environment.
+allow_private_addresses = false
 request_timeout_secs = 20
 # Incremental pull of followed actors' activeObjects.
 sync_interval_secs = 900
 # Full resync (Section 5.3: at least weekly).
 full_resync_interval_secs = 604800
+# Time limit for synchronising one followed actor.
+sync_budget_secs = 600
 delivery_max_attempts = 12
 inbox_rate_per_minute = 120
+# Key fetches for unknown signers per registrable domain (before the
+# signature is verified).
+key_fetch_rate_per_minute = 30
 signature_max_age_secs = 43200
+# New evidence objects beyond this many live objects per remote publisher
+# are dropped.
+max_evidence_per_publisher = 100000
 
 [publish]
 # Local observations are batched into Sightings at this interval (5-15 min).

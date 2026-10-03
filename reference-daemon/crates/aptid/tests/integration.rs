@@ -8,7 +8,7 @@ use apti_core::policy::OperatorPolicy;
 use apti_core::protocol::{AllowlistScope, NewAllowlistEntry, Reply, Request};
 use apti_core::{Behavior, Tlp};
 use aptid::config::Config;
-use aptid::{engine, publish, Daemon};
+use aptid::{db, engine, inbox, publish, Daemon};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixStream};
@@ -20,6 +20,11 @@ const ALLOW: &str = "allow-token-0123456789";
 const ADMIN: &str = "admin-token-0123456789";
 
 async fn spawn(dir: &Path, name: &str) -> Daemon {
+    spawn_with(dir, name, "").await
+}
+
+/// Spawn a daemon; `federation` is appended to the `[federation]` table.
+async fn spawn_with(dir: &Path, name: &str, federation: &str) -> Daemon {
     let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = public.local_addr().unwrap().port();
@@ -62,7 +67,9 @@ scopes = ["allowlist", "publish"]
 socket = "{sock}"
 [federation]
 allow_http = true
+allow_private_addresses = true
 sync_interval_secs = 3600
+{federation}
 [publish]
 batch_interval_secs = 3600
 [policy]
@@ -673,5 +680,68 @@ async fn rest_allowlist() {
     assert_eq!(s, 404);
     engine::recompute(&d.state).await.unwrap();
     assert_eq!(active(&d, READ).await.len(), 1);
+    d.shutdown();
+}
+
+/// Remote input that used to crash the engine or exhaust resources.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hostile_remote_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn_with(dir.path(), "a", "max_evidence_per_publisher = 2").await;
+    let peer = "https://peer.example.org/actor";
+    let now = chrono::Utc::now();
+    let earlier = db::ts(now - chrono::TimeDelta::minutes(1));
+    let sighting = |i: u8| {
+        json!({
+            "type": "Sighting", "id": format!("https://peer.example.org/s/{i}"),
+            "attributedTo": peer, "published": earlier,
+            "observableType": "ipv4-addr", "observableValue": format!("45.13.7.{i}"),
+            "observedBehavior": "scan", "firstSeen": earlier, "lastSeen": earlier,
+            "count": 1, "tlp": "clear"
+        })
+    };
+
+    // Per-publisher quota: new objects beyond it are dropped, updates of
+    // known objects are still accepted.
+    let r = inbox::ingest_objects(&d.state, peer, (1..=3).map(sighting).collect(), false)
+        .await
+        .unwrap();
+    assert_eq!((r.stored, r.ignored), (2, 1), "{r:?}");
+    let mut update = sighting(1);
+    update["updated"] = json!(db::ts(now));
+    let r = inbox::ingest_objects(&d.state, peer, vec![update], true)
+        .await
+        .unwrap();
+    assert_eq!(r.stored, 1, "{r:?}");
+
+    // Extended-year timestamps are rejected on ingest ...
+    let extreme = json!({
+        "type": "ThreatIndicator", "id": "https://peer.example.org/i/1",
+        "attributedTo": peer, "published": "+262142-12-31T00:00:00Z",
+        "observableType": "ipv4-addr", "observableValue": "45.13.7.1",
+        "observedBehavior": "scan", "validFrom": "2026-01-01T00:00:00Z",
+        "validUntil": "+262142-12-31T23:00:00Z", "tlp": "clear"
+    });
+    let r = inbox::ingest_objects(&d.state, peer, vec![extreme.clone()], false)
+        .await
+        .unwrap();
+    assert_eq!(r.invalid, 1, "{r:?}");
+    // ... and objects stored before that check do not crash the engine.
+    let o: apti_core::EvidenceObject = serde_json::from_value(extreme).unwrap();
+    d.state
+        .db
+        .call(move |c| db::upsert_evidence(c, &o, false, &[], None))
+        .await
+        .unwrap();
+    engine::recompute(&d.state).await.unwrap();
+
+    // Control characters in remote strings are rejected.
+    let mut evil = sighting(2);
+    evil["summary"] = json!("\u{1b}]52;c;cm0gLXJmIH4=\u{7}");
+    evil["updated"] = json!(db::ts(now));
+    let r = inbox::ingest_objects(&d.state, peer, vec![evil], true)
+        .await
+        .unwrap();
+    assert_eq!(r.invalid, 1, "{r:?}");
     d.shutdown();
 }

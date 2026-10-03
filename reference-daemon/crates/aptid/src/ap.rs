@@ -70,19 +70,20 @@ pub async fn authenticate(
         .map_err(|e| status(StatusCode::UNAUTHORIZED, &e.to_string()))?;
     let pq = path_and_query(uri);
     let max_age = TimeDelta::seconds(state.cfg.federation.signature_max_age_secs);
-    // Try the cached key first, then refetch once (key rotation).
+    // Try the cached key first, then refetch once (key rotation). A key that
+    // was just fetched is not fetched again.
     for force in [false, true] {
-        let actor = match client::actor_for_key(state, &sig.key_id, force).await {
+        let (actor, fresh) = match client::actor_for_key(state, &sig.key_id, force).await {
             Ok(a) => a,
             Err(e) => {
                 tracing::debug!(key = %sig.key_id, "key lookup failed: {e:#}");
-                if force {
-                    return Err(status(StatusCode::UNAUTHORIZED, "unknown key"));
-                }
-                continue;
+                return Err(status(StatusCode::UNAUTHORIZED, "unknown key"));
             }
         };
         let Some(pem) = actor.public_key_pem.as_deref() else {
+            if fresh {
+                break;
+            }
             continue;
         };
         match httpsig::verify(
@@ -96,7 +97,7 @@ pub async fn authenticate(
             max_age,
         ) {
             Ok(()) => return Ok(actor.id),
-            Err(e @ (httpsig::SigError::Invalid | httpsig::SigError::Key)) if !force => {
+            Err(e @ (httpsig::SigError::Invalid | httpsig::SigError::Key)) if !fresh => {
                 tracing::debug!("signature check failed with cached key: {e}");
             }
             Err(e) => return Err(status(StatusCode::UNAUTHORIZED, &e.to_string())),

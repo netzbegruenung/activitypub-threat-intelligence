@@ -1,9 +1,13 @@
 //! Pull synchronisation of followed actors' `activeObjects` (Section 5.3).
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use apti_core::MAX_BATCH;
 use chrono::{TimeDelta, Utc};
 use serde_json::Value;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::client::{self, as_list, id_of};
 use crate::db::{self, FollowingRow};
@@ -12,6 +16,8 @@ use crate::state::{AppState, Shared};
 
 /// Upper bound on pages read per sync (Section 10, resource exhaustion).
 const MAX_PAGES: usize = 1000;
+/// Followed actors synchronised in parallel.
+const SYNC_CONCURRENCY: usize = 4;
 
 /// Synchronise one followed actor. Returns the ingest report.
 pub async fn sync_actor(state: &AppState, row: &FollowingRow) -> anyhow::Result<IngestReport> {
@@ -56,10 +62,17 @@ pub async fn sync_actor(state: &AppState, row: &FollowingRow) -> anyhow::Result<
         } else {
             &page["orderedItems"]
         };
+        let items = as_list(items);
+        if items.len() > MAX_BATCH {
+            anyhow::bail!("page exceeds {MAX_BATCH} items");
+        }
         let mut batch = Vec::new();
         let mut stop = false;
-        for item in as_list(items) {
+        for item in items {
             let item = match item {
+                // Objects by reference are fetched only from the actor's
+                // origin; others could not pass the origin rules anyway.
+                Value::String(id) if !client::same_host(id, &actor.id) => continue,
                 Value::String(id) => match client::signed_get(state, id).await {
                     Ok(v) if v["id"].as_str() == Some(id.as_str()) => v,
                     _ => continue,
@@ -109,17 +122,43 @@ fn due(state: &AppState, row: &FollowingRow) -> bool {
     row.last_full_sync.is_none() || row.last_sync.is_none_or(|t| Utc::now() - t >= interval)
 }
 
-pub async fn sync_due(state: &AppState) -> anyhow::Result<()> {
+/// Synchronise one actor within the configured time budget and record
+/// failures.
+async fn sync_bounded(state: &AppState, row: &FollowingRow) -> anyhow::Result<()> {
+    let budget = Duration::from_secs(state.cfg.federation.sync_budget_secs.max(1));
+    let result = match tokio::time::timeout(budget, sync_actor(state, row)).await {
+        Ok(r) => r.map(|_| ()),
+        Err(_) => Err(anyhow::anyhow!(
+            "sync exceeded {}s budget",
+            budget.as_secs()
+        )),
+    };
+    if let Err(e) = result {
+        tracing::warn!(actor = %row.actor, "sync failed: {e:#}");
+        let (a, msg) = (row.actor.clone(), format!("{e:#}"));
+        state
+            .db
+            .call(move |c| db::record_sync(c, &a, None, false, Some(&msg)))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Synchronise all due actors, a few at a time, so that one slow or
+/// hostile peer cannot hold up the others (Section 10).
+pub async fn sync_due(state: &Shared) -> anyhow::Result<()> {
     let rows = state.db.call(|c| db::list_following(c)).await?;
-    for row in rows.iter().filter(|r| due(state, r)) {
-        if let Err(e) = sync_actor(state, row).await {
-            tracing::warn!(actor = %row.actor, "sync failed: {e:#}");
-            let (a, msg) = (row.actor.clone(), format!("{e:#}"));
-            state
-                .db
-                .call(move |c| db::record_sync(c, &a, None, false, Some(&msg)))
-                .await?;
-        }
+    let permits = Arc::new(Semaphore::new(SYNC_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+    for row in rows.into_iter().filter(|r| due(state, r)) {
+        let (state, permits) = (state.clone(), permits.clone());
+        tasks.spawn(async move {
+            let _permit = permits.acquire_owned().await?;
+            sync_bounded(&state, &row).await
+        });
+    }
+    while let Some(r) = tasks.join_next().await {
+        r??;
     }
     Ok(())
 }

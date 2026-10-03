@@ -57,6 +57,46 @@ impl Client {
             self.conn = None;
             bail!("no reply from daemon");
         }
-        Ok(serde_json::from_str(&buf)?)
+        let mut reply: serde_json::Value = serde_json::from_str(&buf)?;
+        strip_control(&mut reply);
+        Ok(serde_json::from_value(reply)?)
+    }
+}
+
+/// Replace control characters in all strings of a reply. Replies carry data
+/// from remote peers (ids, operator claims, error messages); ratatui passes
+/// control characters through to the terminal, which would allow escape
+/// sequence injection.
+pub fn strip_control(v: &mut serde_json::Value) {
+    use serde_json::Value;
+    match v {
+        Value::String(s) if s.contains(char::is_control) => {
+            *s = s
+                .chars()
+                .map(|c| match c {
+                    '\n' | '\t' => ' ',
+                    c if c.is_control() => char::REPLACEMENT_CHARACTER,
+                    c => c,
+                })
+                .collect();
+        }
+        Value::Array(a) => a.iter_mut().for_each(strip_control),
+        Value::Object(o) => o.values_mut().for_each(strip_control),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_nested_control_characters() {
+        let mut v = serde_json::json!({"a": ["x\u{1b}[2Jy", {"b": "\u{9b}31m"}], "n": 1});
+        strip_control(&mut v);
+        assert_eq!(
+            v,
+            serde_json::json!({"a": ["x\u{fffd}[2Jy", {"b": "\u{fffd}31m"}], "n": 1})
+        );
     }
 }

@@ -323,8 +323,11 @@ These are deliberate scope cuts for a reference implementation:
   Opinions count only if their operator is trusted.
 - **Exports:** JSON only. There are no TAXII, RPZ, DNSBL or nftables exports;
   `ttl` makes a client-side nftables export simple.
-- **SSRF:** remote URLs must be https (or http with `allow_http`), but their
-  resolved addresses are not checked against private ranges.
+- **SSRF:** remote URLs must be https (or http with `allow_http`) and resolve
+  to public addresses (unless `allow_private_addresses` is set). An actor's
+  inbox, shared inbox and `activeObjects` must be on the actor's own host.
+  An HTTP(S) proxy taken from the environment must also have a public
+  address.
 - **Scale:** the engine reloads all live evidence on every recompute. This is
   fine for tens of thousands of objects, but not for a large aggregator.
 - **Shutdown:** in-flight HTTP requests are not drained on shutdown.
