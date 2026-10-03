@@ -136,6 +136,12 @@ fn special_ip(net: &IpNet) -> Option<Special> {
     found
 }
 
+/// Whether `ip` is in an RFC 6890 special-purpose or documentation range,
+/// i.e. not a globally reachable unicast address.
+pub fn is_special_purpose_ip(ip: IpAddr) -> bool {
+    special_ip(&IpNet::from(ip)).is_some()
+}
+
 fn special_name(name: &str) -> Option<Special> {
     NAME_SPECIAL.iter().find_map(|(suffix, kind)| {
         (name == *suffix || name.ends_with(&format!(".{suffix}"))).then_some(*kind)
@@ -294,6 +300,30 @@ pub fn covers(ty: ObservableType, container: &str, target: &str, include_subdoma
     }
 }
 
+/// All normalised values `c` with `covers(ty, c, value, false)`: the value
+/// itself and, for IP observables, every prefix containing it. Lets callers
+/// find covering entries by exact lookup instead of scanning.
+pub fn covering_values(ty: ObservableType, value: &str) -> Vec<String> {
+    let net = match ty {
+        ObservableType::Ipv4Addr | ObservableType::Ipv6Addr => ip_net(value),
+        _ => None,
+    };
+    let Some(net) = net else {
+        return vec![value.to_string()];
+    };
+    (0..=net.prefix_len())
+        .filter_map(|len| IpNet::new(net.addr(), len).ok())
+        .map(|n| {
+            let n = n.trunc();
+            if n.prefix_len() == n.max_prefix_len() {
+                n.addr().to_string()
+            } else {
+                n.to_string()
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +429,29 @@ mod tests {
             Err(NormError::TypeMismatch(ObservableType::Ipv6Addr))
         );
         assert!(normalise("8.8.8.8", Some(ObservableType::DomainName), &p()).is_err());
+    }
+
+    #[test]
+    fn covering_values_match_covers() {
+        let v4 = covering_values(ObservableType::Ipv4Addr, "8.8.4.4");
+        assert_eq!(v4.len(), 33);
+        assert!(v4.contains(&"8.8.4.4".to_string()));
+        assert!(v4.contains(&"8.8.4.0/24".to_string()));
+        assert!(v4.contains(&"0.0.0.0/0".to_string()));
+        for c in &v4 {
+            assert!(covers(ObservableType::Ipv4Addr, c, "8.8.4.4", false), "{c}");
+        }
+        let v6 = covering_values(ObservableType::Ipv6Addr, "2a00:1450:4001::/48");
+        assert_eq!(v6.len(), 49);
+        assert!(v6.contains(&"2a00:1450:4001::/48".to_string()));
+        assert!(v6.contains(&"2a00:1450::/32".to_string()));
+        assert_eq!(
+            covering_values(ObservableType::DomainName, "evil.com"),
+            vec!["evil.com".to_string()]
+        );
+        assert!(!is_special_purpose_ip("8.8.4.4".parse().unwrap()));
+        assert!(is_special_purpose_ip("169.254.169.254".parse().unwrap()));
+        assert!(is_special_purpose_ip("::ffff:127.0.0.1".parse().unwrap()));
     }
 
     #[test]

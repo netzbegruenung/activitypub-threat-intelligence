@@ -114,26 +114,41 @@ pub struct Control {
 pub struct Federation {
     /// Permit plain-HTTP URLs for remote actors (development only).
     pub allow_http: bool,
+    /// Permit outgoing requests to loopback, private and other
+    /// special-purpose addresses (development only; SSRF protection).
+    pub allow_private_addresses: bool,
     pub request_timeout_secs: u64,
     pub sync_interval_secs: u64,
     pub full_resync_interval_secs: u64,
+    /// Wall-clock budget for synchronising one followed actor.
+    pub sync_budget_secs: u64,
     pub delivery_max_attempts: u32,
     /// Inbox requests per actor per minute.
     pub inbox_rate_per_minute: u32,
+    /// Remote key fetches per registrable domain per minute. Applies before
+    /// signature verification, so it bounds unauthenticated fetches.
+    pub key_fetch_rate_per_minute: u32,
     /// Max HTTP signature age.
     pub signature_max_age_secs: i64,
+    /// Live evidence objects stored per remote publisher; further new
+    /// objects are dropped.
+    pub max_evidence_per_publisher: u64,
 }
 
 impl Default for Federation {
     fn default() -> Self {
         Self {
             allow_http: false,
+            allow_private_addresses: false,
             request_timeout_secs: 20,
             sync_interval_secs: 900,
             full_resync_interval_secs: 7 * 86400,
+            sync_budget_secs: 600,
             delivery_max_attempts: 12,
             inbox_rate_per_minute: 120,
+            key_fetch_rate_per_minute: 30,
             signature_max_age_secs: 12 * 3600,
+            max_evidence_per_publisher: 100_000,
         }
     }
 }

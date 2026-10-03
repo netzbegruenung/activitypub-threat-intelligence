@@ -1,5 +1,7 @@
 //! Incoming activities (Sections 5.1, 8) and evidence ingestion.
 
+use std::collections::HashSet;
+
 use apti_core::{EvidenceObject, MAX_BATCH};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{json, Value};
@@ -94,15 +96,37 @@ pub async fn ingest_objects(
         valid.push(o);
     }
     let actor = actor.to_string();
+    let quota = state.cfg.federation.max_evidence_per_publisher;
     let (stored, ignored, deleted) = state
         .db
         .call(move |c| {
             let (mut stored, mut ignored, mut deleted) = (0, 0, 0);
+            // Bound the storage and engine work one publisher can cause
+            // (Section 10). Updates of known objects are always accepted.
+            let mut live = db::count_evidence_by_publisher(c, &actor)?;
+            let mut over_quota = 0;
             for o in &valid {
+                if live >= quota && db::get_evidence(c, &o.id)?.is_none() {
+                    over_quota += 1;
+                    continue;
+                }
                 match db::upsert_evidence(c, o, false, &[], None)? {
-                    Upsert::Inserted | Upsert::Updated => stored += 1,
+                    Upsert::Inserted => {
+                        stored += 1;
+                        live += 1;
+                    }
+                    Upsert::Updated => stored += 1,
                     Upsert::Ignored => ignored += 1,
                 }
+            }
+            if over_quota > 0 {
+                tracing::warn!(
+                    actor,
+                    dropped = over_quota,
+                    quota,
+                    "publisher exceeds evidence quota"
+                );
+                ignored += over_quota;
             }
             for (id, when) in &tombstones {
                 if host_of(id) == host_of(&actor)
@@ -246,9 +270,30 @@ pub async fn process(state: &AppState, actor: &str, activity: &Value) -> anyhow:
             changed = delete_ids(state, actor, ids).await? > 0;
         }
         "Announce" => {
-            // Re-fetch each object from its origin (Section 8).
-            for v in objects.iter().take(MAX_BATCH) {
+            // Re-fetch each object from its origin (Section 8). Only objects
+            // hosted alongside an actor we follow can be relevant; fetching
+            // anything else would let any signer make us issue requests to
+            // arbitrary URLs.
+            if objects.len() > MAX_BATCH {
+                anyhow::bail!("activity exceeds {MAX_BATCH} objects");
+            }
+            let followed_hosts: HashSet<String> = state
+                .db
+                .call(|c| db::list_following(c))
+                .await?
+                .iter()
+                .filter_map(|f| host_of(&f.actor))
+                .collect();
+            for v in &objects {
                 let Some(id) = id_of(v) else { continue };
+                if !host_of(id).is_some_and(|h| followed_hosts.contains(&h)) {
+                    tracing::debug!(
+                        actor,
+                        id,
+                        "ignoring Announce of object on an unfollowed origin"
+                    );
+                    continue;
+                }
                 let fetched = match client::signed_get(state, id).await {
                     Ok(f) => f,
                     Err(e) => {
