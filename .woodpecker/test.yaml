@@ -1,0 +1,19 @@
+# Runs the full test suite for every pull request.
+when:
+  - event: pull_request
+
+steps:
+  - name: fmt
+    image: rust:1.85-bookworm
+    commands:
+      - rustup component add rustfmt
+      - cd reference-daemon
+      - cargo fmt --all --check
+
+  - name: test
+    image: rust:1.85-bookworm
+    environment:
+      CARGO_TERM_COLOR: never
+    commands:
+      - cd reference-daemon
+      - cargo test --workspace --locked
