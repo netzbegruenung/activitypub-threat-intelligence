@@ -18,15 +18,25 @@ use crate::{centered, fmt_secs};
 
 pub enum FormKind {
     Follow,
-    OperatorPolicy { operator: String },
-    ClearOperatorPolicy { operator: String },
+    OperatorPolicy {
+        operator: String,
+    },
+    ClearOperatorPolicy {
+        operator: String,
+    },
     MapActor,
-    Behavior { behavior: Behavior },
+    Behavior {
+        behavior: Behavior,
+    },
     Tlp,
     Allowlist,
     Lookup,
     CreateToken,
-    EditToken { id: i64 },
+    EditToken {
+        id: i64,
+    },
+    /// Column filter of the current table; applied locally, not a request.
+    Filter,
 }
 
 pub struct Field {
@@ -374,6 +384,25 @@ impl Form {
         )
     }
 
+    pub fn filter(columns: &[&'static str], current: &[String]) -> Self {
+        Self::new(
+            " Filter (case-insensitive substring per column; empty = any) ",
+            FormKind::Filter,
+            columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| field(c, current.get(i).cloned().unwrap_or_default(), ""))
+                .collect(),
+        )
+    }
+
+    /// Trimmed values of all fields.
+    pub fn values(&self) -> Vec<String> {
+        (0..self.fields.len())
+            .map(|i| self.v(i).to_string())
+            .collect()
+    }
+
     pub fn done_message(&self) -> &'static str {
         match self.kind {
             FormKind::Follow => "follow request sent",
@@ -383,7 +412,7 @@ impl Form {
             FormKind::Behavior { .. } => "behaviour policy saved",
             FormKind::Tlp => "TLP settings saved",
             FormKind::Allowlist => "allowlist entry added",
-            FormKind::Lookup => "",
+            FormKind::Lookup | FormKind::Filter => "",
             FormKind::CreateToken => "token created",
             FormKind::EditToken { .. } => "token updated",
         }
@@ -515,6 +544,7 @@ impl Form {
                 scopes: parse_scopes(self.v(0))?,
                 max_tlp: parse_tlp_opt(self.v(1))?.ok_or("max TLP is required")?,
             },
+            FormKind::Filter => return Err("filters are applied locally".into()),
         })
     }
 
@@ -548,7 +578,13 @@ impl Form {
     }
 
     pub fn draw(&self, f: &mut Frame) {
-        let height = self.fields.len() as u16 * 3 + 4;
+        // Input line, optional hint line, spacing.
+        let heights: Vec<u16> = self
+            .fields
+            .iter()
+            .map(|fl| if fl.hint.is_empty() { 2 } else { 3 })
+            .collect();
+        let height = heights.iter().sum::<u16>() + 4;
         let area = centered(f.area(), 80, height);
         f.render_widget(Clear, area);
         let block = Block::default()
@@ -558,7 +594,7 @@ impl Form {
         let inner = block.inner(area);
         f.render_widget(block, area);
         let mut constraints: Vec<Constraint> =
-            self.fields.iter().map(|_| Constraint::Length(3)).collect();
+            heights.iter().map(|h| Constraint::Length(*h)).collect();
         constraints.push(Constraint::Length(1));
         let rows = Layout::vertical(constraints).split(inner);
         for (i, fl) in self.fields.iter().enumerate() {
