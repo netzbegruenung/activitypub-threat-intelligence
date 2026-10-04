@@ -31,12 +31,14 @@ pub async fn tlp_settings(state: &AppState) -> anyhow::Result<(Tlp, Vec<String>)
 }
 
 /// Addressing for a TLP (Section 5.2): `(to, cc, recipient actors)`.
-/// For CLEAR and GREEN the recipients are the accepted followers.
-pub async fn addressing(
+/// For CLEAR and GREEN the recipients are the accepted followers, for AMBER
+/// the stored `audience` of the objects (see [`audience_for`]).
+pub fn addressing(
     state: &AppState,
     tlp: Tlp,
+    followers: Vec<String>,
+    audience: &[String],
 ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
-    let followers = state.db.call(|c| db::accepted_followers(c)).await?;
     let urls = &state.urls;
     Ok(match tlp {
         Tlp::Clear => (
@@ -45,15 +47,14 @@ pub async fn addressing(
             followers,
         ),
         Tlp::Green => (vec![urls.followers.clone()], vec![], followers),
-        Tlp::Amber | Tlp::AmberStrict => {
-            let (_, recipients) = tlp_settings(state).await?;
-            (recipients.clone(), vec![], recipients)
-        }
+        Tlp::Amber | Tlp::AmberStrict => (audience.to_vec(), vec![], audience.to_vec()),
         Tlp::Red => anyhow::bail!("TLP:RED must not be shared"),
     })
 }
 
-/// Named audience to store with AMBER objects (controls signed-fetch access).
+/// Named audience to store with new AMBER objects: the current recipient
+/// list. It controls signed-fetch access and the recipients of later
+/// `Update`s and `Delete`s of the object.
 pub async fn audience_for(state: &AppState, tlp: Tlp) -> anyhow::Result<Vec<String>> {
     Ok(match tlp {
         Tlp::Amber | Tlp::AmberStrict => tlp_settings(state).await?.1,
@@ -98,18 +99,20 @@ pub async fn send_activity(
 }
 
 /// Publish `Create`/`Update` (with objects) or `Delete` (with ids), all
-/// sharing `tlp`. Splits into activities of at most 1000 objects.
+/// sharing `tlp` and, for AMBER, the stored `audience`. Splits into
+/// activities of at most 1000 objects.
 pub async fn publish(
     state: &AppState,
     kind: &str,
     objects: Vec<Value>,
     tlp: Tlp,
+    audience: Vec<String>,
 ) -> anyhow::Result<()> {
     if objects.is_empty() {
         return Ok(());
     }
-    let (to, cc, recipients) = addressing(state, tlp).await?;
-    let audience = audience_for(state, tlp).await?;
+    let followers = state.db.call(|c| db::accepted_followers(c)).await?;
+    let (to, cc, recipients) = addressing(state, tlp, followers, &audience)?;
     for chunk in objects.chunks(MAX_BATCH) {
         let object = if chunk.len() == 1 {
             chunk[0].clone()
@@ -208,7 +211,7 @@ pub async fn run_batch(state: &AppState) -> anyhow::Result<usize> {
     let (policy, behavior_tlp) = engine::load_policy(state).await?;
     let (default_tlp, _) = tlp_settings(state).await?;
     let now = Utc::now();
-    let mut groups: BTreeMap<(&'static str, Tlp), Vec<Value>> = BTreeMap::new();
+    let mut groups: BTreeMap<(&'static str, Tlp, Vec<String>), Vec<Value>> = BTreeMap::new();
     let n = pending.len();
     for obs in pending {
         let existing_id = obs.sighting_id.clone();
@@ -217,34 +220,38 @@ pub async fn run_batch(state: &AppState) -> anyhow::Result<usize> {
                 .db
                 .call(move |c| db::get_evidence(c, &id))
                 .await?
-                .filter(|e| e.deleted.is_none())
-                .map(|e| e.object),
+                .filter(|e| e.deleted.is_none()),
             None => None,
         };
         let tlp = existing
             .as_ref()
-            .map(|e| e.tlp)
+            .map(|e| e.object.tlp)
             .or_else(|| behavior_tlp.get(&obs.behavior).copied().flatten())
             .unwrap_or(default_tlp);
+        // An existing object keeps the audience it was first published to.
+        let audience = match &existing {
+            Some(e) => e.audience.clone(),
+            None => audience_for(state, tlp).await?,
+        };
+        let existing = existing.map(|e| e.object);
         let (sighting, is_update) = sighting_from(state, &obs, existing, tlp, now);
         let listed_until = obs.last_seen + policy.ttl(obs.behavior, obs.observable_type);
-        let audience = audience_for(state, tlp).await?;
-        let s = sighting.clone();
+        let (s, a) = (sighting.clone(), audience.clone());
         state
             .db
             .call(move |c| {
-                db::upsert_evidence(c, &s, true, &audience, Some(listed_until))?;
+                db::upsert_evidence(c, &s, true, &a, Some(listed_until))?;
                 db::mark_observation_published(c, &obs, &s.id)
             })
             .await?;
         let kind = if is_update { "Update" } else { "Create" };
         groups
-            .entry((kind, tlp))
+            .entry((kind, tlp, audience))
             .or_default()
             .push(object_json(&sighting));
     }
-    for ((kind, tlp), objects) in groups {
-        publish(state, kind, objects, tlp).await?;
+    for ((kind, tlp, audience), objects) in groups {
+        publish(state, kind, objects, tlp, audience).await?;
     }
     state.recompute.notify_one();
     Ok(n)

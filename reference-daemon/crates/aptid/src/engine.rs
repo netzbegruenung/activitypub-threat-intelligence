@@ -212,7 +212,7 @@ pub fn evaluate(
     out
 }
 
-/// Last moment at which remote evidence can still contribute.
+/// Last moment at which evidence can still contribute.
 fn relevant_until(o: &EvidenceObject, policy: &PolicySet) -> DateTime<Utc> {
     let ty = o.observable_type.unwrap_or(ObservableType::DomainName);
     let max_age = o
@@ -249,12 +249,14 @@ pub async fn recompute(state: &AppState) -> anyhow::Result<usize> {
         .await?;
     map.insert(local_actor.clone(), (org, "local".into()));
 
-    // Retention for remote evidence that can no longer contribute.
+    // Retention (Section 11) for evidence that can no longer contribute.
+    // Own Sightings have left activeObjects by then (lastSeen + T); own
+    // Opinions stay linked to their allowlist entries.
     let retention = TimeDelta::days(state.cfg.policy.retention_days);
     let stale: Vec<String> = evidence
         .iter()
         .filter(|o| {
-            o.attributed_to != local_actor
+            (o.attributed_to != local_actor || o.kind == EvidenceKind::Sighting)
                 && saturating_add(relevant_until(o, &policy), retention) < now
         })
         .map(|o| o.id.clone())

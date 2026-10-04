@@ -49,6 +49,11 @@ See [`config.example.toml`](config.example.toml). The TOML file holds:
 - policy defaults: `k`, local weight, T/M/TLP per behaviour, bootstrap trust
   per operator, and a static allowlist of high-impact infrastructure.
 
+Settings the spec bounds are checked at startup: `publish.tombstone_days`
+must be at least 180, `federation.full_resync_interval_secs` at most a week,
+`policy.recompute_interval_secs` at most an hour, and
+`policy.reject_special_purpose` must stay `true`.
+
 Anything you change in the TUI is stored in the database and **overrides**
 the file.
 
@@ -120,7 +125,8 @@ curl -H "Authorization: Bearer $TOKEN" \
 directly as an nftables or ipset element timeout. Filters: `type`, `behavior`,
 `port`, `service`.
 
-Each entry carries the most restrictive TLP of the evidence that supports it.
+Each entry carries the most restrictive TLP of the evidence that supports it
+(indicators in effect, Sightings within T and `agree` Opinions).
 Entries above the token's `max_tlp` are left out, which keeps the TLP intact
 (Sec. 9).
 
@@ -261,7 +267,7 @@ TLP visibility on fetch:
 |---|---|
 | CLEAR | anyone |
 | GREEN | accepted followers |
-| AMBER, AMBER+STRICT | the named recipients that were configured when the object was published |
+| AMBER, AMBER+STRICT | the named recipients that were configured when the object was first published. Later `Update`s and `Delete`s of the object go to the same recipients. |
 
 ## TUI
 
@@ -354,5 +360,16 @@ These are deliberate scope cuts for a reference implementation:
   fine for tens of thousands of objects, but not for a large aggregator.
 - **Shutdown:** in-flight HTTP requests are not drained on shutdown.
 - **AMBER visibility:** AMBER objects are visible to the recipient list that
-  was configured when they were published. Changing the list later does not
-  change who can see existing objects.
+  was configured when they were first published, and refreshed Sightings are
+  delivered only to that list. Changing the list later affects new objects
+  only.
+- **Withdrawing Sightings:** own Sightings cannot be withdrawn with `Delete`
+  (for example after a false positive); they age out after T. Publish an
+  allowlist entry to counter them.
+- **Rate limits:** inbox requests are limited per signing actor, not per
+  operator, and signed `GET`s are not rate-limited (Section 10 asks for both).
+- **Federation peers:** the hosts of followed actors and followers are not
+  allowlisted automatically (Section 10). Add them to `policy.allowlist`.
+- **Documentation ranges:** `allow_documentation_ranges` accepts RFC 5737 /
+  RFC 3849 / RFC 2606 values, which Section 10 requires consumers to reject.
+  Use it for demos only.

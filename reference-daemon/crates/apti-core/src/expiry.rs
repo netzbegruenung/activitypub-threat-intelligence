@@ -169,7 +169,10 @@ pub fn assess(
                         allowlisted = true;
                     }
                 } else if op.is_support() {
+                    // Agreement keeps the entry from being suspended, so its
+                    // TLP applies to the export as well (Section 9).
                     support.insert(e.operator.as_str());
+                    tlp = tlp.max(o.tlp);
                 }
             }
         }
@@ -566,6 +569,20 @@ mod tests {
         let ev = [sighting("a", "s1", t("03T10:00:00")), o];
         let a = run(&ev, &p, t("03T11:00:00"));
         assert!(a.active && !a.flagged);
+    }
+
+    #[test]
+    fn supporting_opinion_raises_tlp() {
+        let p = trusting(&[("a", 2.0), ("c", 1.0)]);
+        let mut o = opinion("c", "o1", IP, OpinionValue::Agree, t("03T09:00:00"));
+        o.object.tlp = Tlp::Amber;
+        let a = run(
+            &[sighting("a", "s1", t("03T10:00:00")), o],
+            &p,
+            t("03T11:00:00"),
+        );
+        assert!(a.active);
+        assert_eq!(a.tlp, Tlp::Amber);
     }
 
     #[test]

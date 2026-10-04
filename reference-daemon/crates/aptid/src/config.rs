@@ -287,6 +287,18 @@ impl Config {
         if self.publish.default_tlp == Tlp::Red {
             bail!("publish.default_tlp must not be red");
         }
+        if self.publish.tombstone_days < 180 {
+            bail!("publish.tombstone_days must be at least 180 (Section 5.3)");
+        }
+        if self.federation.full_resync_interval_secs > 7 * 86400 {
+            bail!("federation.full_resync_interval_secs must be at most 604800 (Section 5.3)");
+        }
+        if self.policy.recompute_interval_secs > 3600 {
+            bail!("policy.recompute_interval_secs must be at most 3600 (Section 9)");
+        }
+        if !self.policy.reject_special_purpose {
+            bail!("policy.reject_special_purpose must be true (Section 10)");
+        }
         self.policy.default_k.threshold()?;
         for (b, bc) in &self.policy.behavior {
             if let Some(k) = bc.k {
@@ -376,5 +388,29 @@ k = 1
         assert_eq!(cfg.policy.default_k.threshold().unwrap(), Threshold::Off);
         assert_eq!(cfg.instance.base_url.as_str(), "https://ti.example.net/");
         assert_eq!(cfg.authority(), "ti.example.net");
+    }
+
+    #[test]
+    fn spec_bounds_enforced() {
+        let base = include_str!("../../../config.example.toml");
+        for (from, to) in [
+            ("tombstone_days = 180", "tombstone_days = 179"),
+            (
+                "recompute_interval_secs = 300",
+                "recompute_interval_secs = 3601",
+            ),
+            (
+                "reject_special_purpose = true",
+                "reject_special_purpose = false",
+            ),
+            (
+                "full_resync_interval_secs = 604800",
+                "full_resync_interval_secs = 604801",
+            ),
+        ] {
+            assert!(base.contains(from), "{from}");
+            let err = Config::parse(&base.replace(from, to)).unwrap_err();
+            assert!(format!("{err:#}").contains("must be"), "{err:#}");
+        }
     }
 }

@@ -131,10 +131,10 @@ pub async fn add(
             opinion: Some(OpinionValue::StronglyDisagree),
         };
         let audience = publish::audience_for(state, tlp).await?;
-        let o = opinion.clone();
+        let (o, a) = (opinion.clone(), audience.clone());
         state
             .db
-            .call(move |c| db::upsert_evidence(c, &o, true, &audience, Some(valid_until)))
+            .call(move |c| db::upsert_evidence(c, &o, true, &a, Some(valid_until)))
             .await?;
         entry.tlp = Some(tlp);
         entry.valid_until = Some(valid_until);
@@ -144,6 +144,7 @@ pub async fn add(
             "Create",
             vec![serde_json::to_value(&opinion).map_err(anyhow::Error::from)?],
             tlp,
+            audience,
         )
         .await?;
     }
@@ -164,16 +165,22 @@ pub async fn remove(state: &AppState, id: i64) -> Result<AllowlistEntry, Allowli
         let actor = state.urls.actor.clone();
         let tombstone_days = state.cfg.publish.tombstone_days;
         let oid = object_id.clone();
+        // The Delete goes to the audience the Opinion was published to.
         let removed = state
             .db
             .call(move |c| {
+                let audience = db::get_evidence(c, &oid)?
+                    .map(|e| e.audience)
+                    .unwrap_or_default();
                 let now = Utc::now();
-                db::mark_deleted(c, &oid, &actor, now, now + TimeDelta::days(tombstone_days))
+                let removed =
+                    db::mark_deleted(c, &oid, &actor, now, now + TimeDelta::days(tombstone_days))?;
+                Ok(removed.then_some(audience))
             })
             .await?;
-        if removed {
+        if let Some(audience) = removed {
             let tlp = entry.tlp.unwrap_or(Tlp::Green);
-            publish::publish(state, "Delete", vec![json!(object_id)], tlp).await?;
+            publish::publish(state, "Delete", vec![json!(object_id)], tlp, audience).await?;
         }
     }
     state.recompute.notify_one();

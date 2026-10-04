@@ -151,7 +151,7 @@ pub async fn webfinger(state: &AppState, handle: &str) -> anyhow::Result<String>
     } else {
         "https"
     };
-    let mut u = Url::parse(&format!("{scheme}://{host}/.well-known/webfinger"))?;
+    let mut u = check_url(state, &format!("{scheme}://{host}/.well-known/webfinger"))?;
     u.query_pairs_mut()
         .append_pair("resource", &format!("acct:{h}"));
     let resp = state
@@ -327,7 +327,10 @@ pub async fn resolve_operator(state: &AppState, actor: &RemoteActor) -> (String,
                 let lists_actor = as_list(&org["operatedActors"])
                     .into_iter()
                     .any(|v| id_of(v) == Some(actor.id.as_str()));
-                if org["id"].as_str() == Some(claim.as_str()) && lists_actor {
+                if org["id"].as_str() == Some(claim.as_str())
+                    && org["type"] == "Organization"
+                    && lists_actor
+                {
                     return (claim.clone(), "verified");
                 }
                 tracing::warn!(actor = %actor.id, operator = %claim, "operator link not confirmed");

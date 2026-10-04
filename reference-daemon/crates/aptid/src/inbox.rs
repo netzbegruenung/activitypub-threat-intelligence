@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use apti_core::{EvidenceObject, MAX_BATCH};
+use apti_core::{EvidenceKind, EvidenceObject, MAX_BATCH};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{json, Value};
 
@@ -97,10 +97,10 @@ pub async fn ingest_objects(
     }
     let actor = actor.to_string();
     let quota = state.cfg.federation.max_evidence_per_publisher;
-    let (stored, ignored, deleted) = state
+    let (stored, ignored, invalid, deleted) = state
         .db
         .call(move |c| {
-            let (mut stored, mut ignored, mut deleted) = (0, 0, 0);
+            let (mut stored, mut ignored, mut invalid, mut deleted) = (0, 0, 0, 0);
             // Bound the storage and engine work one publisher can cause
             // (Section 10). Updates of known objects are always accepted.
             let mut live = db::count_evidence_by_publisher(c, &actor)?;
@@ -108,6 +108,11 @@ pub async fn ingest_objects(
             for o in &valid {
                 if live >= quota && db::get_evidence(c, &o.id)?.is_none() {
                     over_quota += 1;
+                    continue;
+                }
+                if !refs_tlp_ok(c, o)? {
+                    tracing::debug!(actor, id = %o.id, "less restrictive TLP than referenced indicator");
+                    invalid += 1;
                     continue;
                 }
                 match db::upsert_evidence(c, o, false, &[], None)? {
@@ -135,13 +140,30 @@ pub async fn ingest_objects(
                     deleted += 1;
                 }
             }
-            Ok((stored, ignored, deleted))
+            Ok((stored, ignored, invalid, deleted))
         })
         .await?;
     report.stored += stored;
     report.ignored += ignored;
+    report.invalid += invalid;
     report.deleted += deleted;
     Ok(report)
+}
+
+/// A Sighting's `tlp` must not be less restrictive than that of the
+/// indicators it references (Section 4.4). Unknown references are accepted.
+fn refs_tlp_ok(c: &rusqlite::Connection, o: &EvidenceObject) -> anyhow::Result<bool> {
+    if o.kind != EvidenceKind::Sighting {
+        return Ok(true);
+    }
+    for r in &o.indicator_refs {
+        if let Some(i) = db::get_evidence(c, r)? {
+            if i.object.kind == EvidenceKind::ThreatIndicator && i.object.tlp > o.tlp {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 async fn delete_ids(state: &AppState, actor: &str, ids: Vec<String>) -> anyhow::Result<usize> {
