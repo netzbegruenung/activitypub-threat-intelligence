@@ -750,6 +750,49 @@ async fn hostile_remote_evidence() {
     d.shutdown();
 }
 
+/// A Sighting must not be less restrictive than the indicators it
+/// references (Section 4.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn indicator_refs_tlp() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let peer = "https://peer.example.org/actor";
+    let now = chrono::Utc::now();
+    let earlier = db::ts(now - chrono::TimeDelta::minutes(1));
+    let later = db::ts(now + chrono::TimeDelta::days(1));
+    let indicator = json!({
+        "type": "ThreatIndicator", "id": "https://peer.example.org/i/1",
+        "attributedTo": peer, "published": earlier,
+        "observableType": "ipv4-addr", "observableValue": "45.13.7.1",
+        "observedBehavior": "scan", "validFrom": earlier, "validUntil": later,
+        "tlp": "amber"
+    });
+    let sighting = |id: &str, tlp: &str| {
+        json!({
+            "type": "Sighting", "id": format!("https://peer.example.org/s/{id}"),
+            "attributedTo": peer, "published": earlier,
+            "observableType": "ipv4-addr", "observableValue": "45.13.7.1",
+            "observedBehavior": "scan", "firstSeen": earlier, "lastSeen": earlier,
+            "count": 1, "tlp": tlp, "indicatorRefs": ["https://peer.example.org/i/1"]
+        })
+    };
+    let r = inbox::ingest_objects(
+        &d.state,
+        peer,
+        vec![
+            indicator,
+            sighting("1", "green"),
+            sighting("2", "amber"),
+            sighting("3", "amber+strict"),
+        ],
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.stored, r.invalid), (3, 1), "{r:?}");
+    d.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn token_management() {
     let dir = tempfile::tempdir().unwrap();

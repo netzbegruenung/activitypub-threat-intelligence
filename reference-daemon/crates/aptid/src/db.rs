@@ -1013,14 +1013,21 @@ pub fn mark_observation_published(
     o: &Observation,
     sighting_id: &str,
 ) -> anyhow::Result<()> {
+    // Observations merged in since `o` was read stay pending for the next
+    // batch instead of being dropped.
     c.execute(
-        "UPDATE observations SET pending = 0, sighting_id = ?4
+        "UPDATE observations SET sighting_id = ?4,
+             pending = CASE WHEN first_seen = ?5 AND last_seen = ?6 AND count = ?7
+                 THEN 0 ELSE 1 END
          WHERE observable_type = ?1 AND observable_value = ?2 AND behavior = ?3",
         params![
             o.observable_type.as_str(),
             o.observable_value,
             o.behavior.as_str(),
-            sighting_id
+            sighting_id,
+            ts(o.first_seen),
+            ts(o.last_seen),
+            o.count as i64
         ],
     )?;
     Ok(())
@@ -1548,6 +1555,48 @@ mod tests {
             "count": 1, "tlp": "green"
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn observation_merged_during_batch_stays_pending() {
+        let db = Db::open_in_memory().unwrap();
+        db.call(|c| {
+            let now: DateTime<Utc> = "2026-10-03T10:00:00.123Z".parse()?;
+            let obs = Observation {
+                observable_type: ObservableType::Ipv4Addr,
+                observable_value: "8.8.4.4".into(),
+                behavior: Behavior::Scan,
+                port: None,
+                service: None,
+                first_seen: now,
+                last_seen: now,
+                count: 1,
+                sighting_id: None,
+            };
+            add_observation(c, &obs)?;
+            let read = pending_observations(c)?.remove(0);
+            // Arrives after the batch read the row.
+            add_observation(
+                c,
+                &Observation {
+                    last_seen: now + TimeDelta::seconds(5),
+                    ..obs.clone()
+                },
+            )?;
+            mark_observation_published(c, &read, "https://a.example/s/1")?;
+            let again = pending_observations(c)?;
+            assert_eq!(again.len(), 1);
+            assert_eq!(again[0].count, 2);
+            assert_eq!(
+                again[0].sighting_id.as_deref(),
+                Some("https://a.example/s/1")
+            );
+            mark_observation_published(c, &again[0], "https://a.example/s/1")?;
+            assert!(pending_observations(c)?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

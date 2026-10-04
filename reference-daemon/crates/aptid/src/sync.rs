@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use apti_core::MAX_BATCH;
+use apti_core::{FUTURE_TOLERANCE_SECS, MAX_BATCH};
 use chrono::{TimeDelta, Utc};
 use serde_json::Value;
 use tokio::sync::Semaphore;
@@ -40,6 +40,7 @@ pub async fn sync_actor(state: &AppState, row: &FollowingRow) -> anyhow::Result<
         Value::Null => Some(collection.clone()),
         first => Some(first.clone()),
     };
+    let latest_valid = Utc::now() + TimeDelta::seconds(FUTURE_TOLERANCE_SECS);
     let mut newest = None;
     let mut report = IngestReport::default();
     let mut pages = 0;
@@ -86,7 +87,9 @@ pub async fn sync_actor(state: &AppState, row: &FollowingRow) -> anyhow::Result<
                     break;
                 }
             }
-            if let Some(t) = t {
+            // Future-dated items are rejected on ingest (Section 7) and must
+            // not move the sync point past items still to come.
+            if let Some(t) = t.filter(|t| *t <= latest_valid) {
                 newest = Some(newest.map_or(t, |n: chrono::DateTime<Utc>| n.max(t)));
             }
             batch.push(item);

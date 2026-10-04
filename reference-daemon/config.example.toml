@@ -51,7 +51,8 @@ allow_private_addresses = false
 request_timeout_secs = 20
 # Incremental pull of followed actors' activeObjects.
 sync_interval_secs = 900
-# Full resync (Section 5.3: at least weekly).
+# Full resync (Section 5.3: at least weekly; values above 604800 are
+# rejected).
 full_resync_interval_secs = 604800
 # Time limit for synchronising one followed actor.
 sync_budget_secs = 600
@@ -72,7 +73,8 @@ batch_interval_secs = 300
 # scan / brute force / spam / DDoS sources).
 default_tlp = "green"
 manually_approves_followers = true
-# Keep Tombstones in activeObjects (Section 5.3: at least 180 days).
+# Keep Tombstones in activeObjects (Section 5.3: at least 180 days; smaller
+# values are rejected).
 tombstone_days = 180
 
 [policy]
@@ -83,6 +85,7 @@ default_k = 2
 local_weight = 2
 min_v4_prefix = 24
 min_v6_prefix = 48
+# Section 10 requires this; false is rejected.
 reject_special_purpose = true
 # Accept RFC 5737 / RFC 3849 / RFC 2606 documentation values (demos only).
 allow_documentation_ranges = false
@@ -94,6 +97,7 @@ allowlist = [
 ]
 # Delete records of inactive observables after this many days (Section 11).
 retention_days = 30
+# Section 9: at least hourly; values above 3600 are rejected.
 recompute_interval_secs = 300
 
 # Per-behaviour overrides of k, T (ttl_secs), M (max_age_secs) and the TLP

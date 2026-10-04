@@ -69,6 +69,7 @@ Terms are defined by the context in Appendix B. AS2 terms (`id`, `attributedTo`,
 
 - `ipv4-addr`: dotted decimal without leading zeros, optionally `/len` with host bits zero [RFC4632].
 - `ipv6-addr`: [RFC5952] form, optionally `/len` with host bits zero.
+- A full-length prefix (`/32` for IPv4, `/128` for IPv6) is written as the bare address.
 - `domain-name`: lowercase, IDNA A-labels [RFC5890] [RFC5891], no trailing dot.
 
 Consumers SHOULD reject IPv4 prefixes shorter than /24 and IPv6 prefixes shorter than /48.
@@ -124,6 +125,8 @@ A judgement on an observable or indicator. Maps to STIX `opinion`.
 | `validUntil` | MAY | [RFC3339]. Default `published` + 90 d. |
 | `summary` | SHOULD | Rationale |
 
+An Opinion on a prefix also covers the addresses and longer prefixes inside it. An Opinion on a domain covers only that domain. An Opinion with `indicatorRefs` applies to the observable of each referenced indicator.
+
 An Opinion of `strongly-disagree` on an observable with no `indicatorRefs` is an **allowlist entry**. The holder of an address or domain (verifiable via RDAP [RFC9083]) MAY publish `disagree` Opinions.
 
 ## 5. Publication
@@ -146,6 +149,8 @@ All objects in one activity MUST share the same `tlp` and MUST have `attributedT
 | `green` | Followers collection only; actor SHOULD set `manuallyApprovesFollowers` |
 | `amber`, `amber+strict` | Named recipients only |
 | `red` | MUST NOT be shared via this profile |
+
+`Update` and `Delete` of an `amber` or `amber+strict` object SHOULD be addressed to the recipients of its `Create`, so that changing the recipient list does not widen or narrow the audience of existing objects.
 
 Consumers MUST NOT `Announce` or re-share content beyond its TLP.
 
@@ -197,9 +202,9 @@ effectiveExpiry(O, b) = max(E_ind, E_sig)
 
 - Each piece of evidence ages out on its own. An attacker that keeps misbehaving stays listed for as long as trusted operators keep reporting it. Nothing stays listed without fresh trusted evidence.
 - Setting `w(p, b) = k(b)` lets a single operator activate observables alone. `k(b) = off` restricts activation to Indicators.
-- Sightings and Opinions with a `lastSeen` or `published` more than 5 minutes in the future MUST be discarded.
+- Evidence with a `published` or `updated`, or a Sighting with a `lastSeen`, more than 5 minutes in the future MUST be discarded.
 
-**Suspension.** Let D be the summed weight of operators with a current `disagree` or `strongly-disagree` Opinion on `(O, b)`, and S the summed weight of operators supporting it (indicator, Sighting within `T(b)`, or `agree`/`strongly-agree`). When D > 0 the consumer MUST flag `(O, b)` for review. It SHOULD suspend `(O, b)` when D ≥ S. A trusted allowlist entry (Section 4.5) suspends `O` for all covered behaviours.
+**Suspension.** Let D be the summed weight of operators with a current `disagree` or `strongly-disagree` Opinion on `(O, b)`, and S the summed weight of operators supporting it (an indicator that is in effect, i.e. `validFrom <= now < min(validUntil, base + M(b))`, a Sighting within `T(b)`, or `agree`/`strongly-agree`). An operator with both kinds of evidence counts towards D and S. When D > 0 the consumer MUST flag `(O, b)` for review. It SHOULD suspend `(O, b)` when D ≥ S. A trusted allowlist entry (Section 4.5) suspends `O` for all covered behaviours.
 
 **Table 1: Default T / M (non-normative; informed by [RFC9424] and [MISP-DECAY])**
 
@@ -225,7 +230,7 @@ For IP observables, M SHOULD NOT exceed 90 days. The refresh-before-lifetime pat
 
 ## 9. Aggregation
 
-Aggregators apply Sections 7 and 8 and export active `(O, b)` pairs, optionally filtered by behaviour, `port` or `service`. Exports MUST preserve TLP and SHOULD be recomputed at least hourly. Typical targets (informative):
+Aggregators apply Sections 7 and 8 and export active `(O, b)` pairs, optionally filtered by behaviour, `port` or `service`. Exports MUST preserve TLP: an exported pair carries the most restrictive TLP of the evidence supporting it (indicators, Sightings and `agree`/`strongly-agree` Opinions counted in S), and is only given to recipients allowed to see that TLP. Exports SHOULD be recomputed at least hourly. Typical targets (informative):
 
 - TAXII 2.1 collections [TAXII2.1], `valid_until` = effective expiry (Appendix A);
 - DNS RPZ [RPZ] for domains;
