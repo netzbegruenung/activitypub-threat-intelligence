@@ -5,10 +5,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use apti_core::policy::OperatorPolicy;
-use apti_core::protocol::{AllowlistScope, NewAllowlistEntry, Reply, Request};
+use apti_core::protocol::{
+    AllowlistScope, ApiScope, NewAllowlistEntry, NewApiToken, Reply, Request,
+};
 use apti_core::{Behavior, Tlp};
 use aptid::config::Config;
-use aptid::{db, engine, inbox, publish, Daemon};
+use aptid::{api, db, engine, inbox, publish, Daemon};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixStream};
@@ -41,28 +43,6 @@ key_file = "{key}"
 bind = "127.0.0.1:0"
 [api]
 bind = "127.0.0.1:0"
-[[api.tokens]]
-name = "push"
-token = "{PUSH}"
-scopes = ["push"]
-[[api.tokens]]
-name = "read"
-token = "{READ}"
-scopes = ["read"]
-max_tlp = "amber"
-[[api.tokens]]
-name = "read-clear"
-token = "{READ_CLEAR}"
-scopes = ["read"]
-max_tlp = "clear"
-[[api.tokens]]
-name = "allow"
-token = "{ALLOW}"
-scopes = ["allowlist"]
-[[api.tokens]]
-name = "admin"
-token = "{ADMIN}"
-scopes = ["allowlist", "publish"]
 [control]
 socket = "{sock}"
 [federation]
@@ -81,7 +61,31 @@ allowlist = ["8.8.8.8"]
         sock = d.join("control.sock").display(),
     );
     let cfg = Config::parse(&cfg).unwrap();
-    aptid::start_with_listeners(cfg, public, api).await.unwrap()
+    let d = aptid::start_with_listeners(cfg, public, api).await.unwrap();
+    add_token(&d, "push", PUSH, &[ApiScope::Push], Tlp::Green).await;
+    add_token(&d, "read", READ, &[ApiScope::Read], Tlp::Amber).await;
+    add_token(&d, "read-clear", READ_CLEAR, &[ApiScope::Read], Tlp::Clear).await;
+    add_token(&d, "allow", ALLOW, &[ApiScope::Allowlist], Tlp::Green).await;
+    add_token(
+        &d,
+        "admin",
+        ADMIN,
+        &[ApiScope::Allowlist, ApiScope::Publish],
+        Tlp::Green,
+    )
+    .await;
+    d
+}
+
+/// Store a token with a known secret (the control socket only hands out
+/// generated ones).
+async fn add_token(d: &Daemon, name: &str, secret: &str, scopes: &[ApiScope], max_tlp: Tlp) {
+    let (name, hash, scopes) = (name.to_string(), api::hash_token(secret), scopes.to_vec());
+    d.state
+        .db
+        .call(move |c| db::insert_api_token(c, &name, &hash, &scopes, max_tlp))
+        .await
+        .unwrap();
 }
 
 async fn ctl(d: &Daemon, req: Request) -> Reply {
@@ -743,5 +747,103 @@ async fn hostile_remote_evidence() {
         .await
         .unwrap();
     assert_eq!(r.invalid, 1, "{r:?}");
+    d.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn token_management() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let obs = json!({"value": "45.13.7.9", "behavior": "scan"});
+
+    let Reply::TokenCreated { token, secret } = ctl(
+        &d,
+        Request::CreateToken(NewApiToken {
+            name: "sensor".into(),
+            scopes: vec![ApiScope::Push, ApiScope::Push],
+            max_tlp: Tlp::Green,
+        }),
+    )
+    .await
+    else {
+        panic!("expected TokenCreated")
+    };
+    assert_eq!(token.scopes, vec![ApiScope::Push]);
+    assert_eq!(push(&d, &secret, obs.clone()).await.0, 200);
+
+    // Only the SHA-512 hash is stored.
+    let (stored, last_used) = d
+        .state
+        .db
+        .call(|c| {
+            Ok(c.query_row(
+                "SELECT hash, last_used FROM api_tokens WHERE name = 'sensor'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored, api::hash_token(&secret));
+    assert_ne!(stored, secret);
+    assert!(last_used.is_some());
+
+    // Invalid input is rejected.
+    for (name, scopes) in [
+        ("sensor", vec![ApiScope::Read]),
+        ("bad name", vec![ApiScope::Read]),
+        ("x", vec![]),
+    ] {
+        let r = ctl(
+            &d,
+            Request::CreateToken(NewApiToken {
+                name: name.into(),
+                scopes,
+                max_tlp: Tlp::Green,
+            }),
+        )
+        .await;
+        assert!(matches!(r, Reply::Error(_)), "{name}: {r:?}");
+    }
+
+    // Scope changes apply immediately.
+    ctl_ok(
+        &d,
+        Request::UpdateToken {
+            id: token.id,
+            scopes: vec![ApiScope::Read],
+            max_tlp: Tlp::Clear,
+        },
+    )
+    .await;
+    assert_eq!(push(&d, &secret, obs.clone()).await.0, 403);
+
+    // Rotation invalidates the old secret.
+    ctl_ok(
+        &d,
+        Request::UpdateToken {
+            id: token.id,
+            scopes: vec![ApiScope::Push],
+            max_tlp: Tlp::Clear,
+        },
+    )
+    .await;
+    let Reply::TokenCreated { secret: new, .. } =
+        ctl(&d, Request::RotateToken { id: token.id }).await
+    else {
+        panic!("expected TokenCreated")
+    };
+    assert_ne!(new, secret);
+    assert_eq!(push(&d, &secret, obs.clone()).await.0, 401);
+    assert_eq!(push(&d, &new, obs.clone()).await.0, 200);
+
+    let Reply::Tokens(list) = ctl(&d, Request::ListTokens).await else {
+        panic!("expected Tokens")
+    };
+    assert!(list.iter().any(|t| t.name == "sensor"));
+    assert_eq!(list.len(), 6);
+
+    ctl_ok(&d, Request::DeleteToken { id: token.id }).await;
+    assert_eq!(push(&d, &new, obs).await.0, 401);
     d.shutdown();
 }

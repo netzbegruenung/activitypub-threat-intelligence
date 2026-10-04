@@ -3,18 +3,23 @@
 //! manages the allowlist.
 
 use apti_core::normalize;
-use apti_core::protocol::{AllowlistEntry, AllowlistScope, NewAllowlistEntry};
+use apti_core::protocol::{
+    AllowlistEntry, AllowlistScope, ApiScope, ApiTokenInfo, NewAllowlistEntry,
+};
 use apti_core::{Behavior, ObservableType, Tlp, FUTURE_TOLERANCE_SECS, MAX_BATCH};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::{DateTime, TimeDelta, Utc};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha512};
 
 use crate::allowlist::{self, AllowlistError};
-use crate::config::{ApiToken, Scope};
 use crate::db::{self, Observation};
 use crate::engine::LocalAllowlist;
 use crate::state::Shared;
@@ -39,36 +44,48 @@ fn error(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
-/// Constant-time comparison of two byte strings.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+/// Create a new random token secret (256 bits).
+pub fn generate_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    format!("apti_{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn authorise<'a>(
-    state: &'a Shared,
+/// Lowercase hex SHA-512 of a token secret, as stored in the database.
+/// Secrets are random with 256 bits of entropy, so no salt or slow hash is
+/// needed.
+pub fn hash_token(secret: &str) -> String {
+    Sha512::digest(secret.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+async fn authorise(
+    state: &Shared,
     headers: &HeaderMap,
-    scope: Scope,
-) -> Result<&'a ApiToken, Response> {
-    authorise_any(state, headers, &[scope])
+    scope: ApiScope,
+) -> Result<ApiTokenInfo, Response> {
+    authorise_any(state, headers, &[scope]).await
 }
 
 /// Authorise a token holding at least one of `scopes`.
-fn authorise_any<'a>(
-    state: &'a Shared,
+async fn authorise_any(
+    state: &Shared,
     headers: &HeaderMap,
-    scopes: &[Scope],
-) -> Result<&'a ApiToken, Response> {
+    scopes: &[ApiScope],
+) -> Result<ApiTokenInfo, Response> {
     let presented = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
+    let hash = hash_token(presented.trim());
     let token = state
-        .cfg
-        .api
-        .tokens
-        .iter()
-        .find(|t| ct_eq(t.token.as_bytes(), presented.trim().as_bytes()))
+        .db
+        .call(move |c| db::authenticate_api_token(c, &hash, Utc::now()))
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?
         .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "invalid token"))?;
     if !scopes.iter().any(|s| token.scopes.contains(s)) {
         return Err(error(StatusCode::FORBIDDEN, "token lacks scope"));
@@ -116,7 +133,7 @@ async fn push(
     headers: HeaderMap,
     Json(body): Json<OneOrMany>,
 ) -> Response {
-    if let Err(r) = authorise(&state, &headers, Scope::Push) {
+    if let Err(r) = authorise(&state, &headers, ApiScope::Push).await {
         return r;
     }
     let items = match body {
@@ -251,7 +268,7 @@ async fn active(
     headers: HeaderMap,
     Query(q): Query<ActiveQuery>,
 ) -> Response {
-    let token = match authorise(&state, &headers, Scope::Read) {
+    let token = match authorise(&state, &headers, ApiScope::Read).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -376,8 +393,8 @@ fn allowlist_error(e: AllowlistError) -> Response {
 }
 
 /// Published entries are federated and need the `publish` scope as well.
-fn check_publish(token: &ApiToken, scope: AllowlistScope) -> Result<(), Response> {
-    if scope == AllowlistScope::Published && !token.scopes.contains(&Scope::Publish) {
+fn check_publish(token: &ApiTokenInfo, scope: AllowlistScope) -> Result<(), Response> {
+    if scope == AllowlistScope::Published && !token.scopes.contains(&ApiScope::Publish) {
         return Err(error(
             StatusCode::FORBIDDEN,
             "published entries require the `publish` scope",
@@ -391,7 +408,7 @@ async fn allowlist_list(
     headers: HeaderMap,
     Query(q): Query<AllowlistQuery>,
 ) -> Response {
-    if let Err(r) = authorise_any(&state, &headers, &[Scope::Read, Scope::Allowlist]) {
+    if let Err(r) = authorise_any(&state, &headers, &[ApiScope::Read, ApiScope::Allowlist]).await {
         return r;
     }
     match allowlist::list(&state).await {
@@ -411,7 +428,7 @@ async fn allowlist_get(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    if let Err(r) = authorise_any(&state, &headers, &[Scope::Read, Scope::Allowlist]) {
+    if let Err(r) = authorise_any(&state, &headers, &[ApiScope::Read, ApiScope::Allowlist]).await {
         return r;
     }
     match allowlist::get(&state, id).await {
@@ -426,12 +443,12 @@ async fn allowlist_add(
     headers: HeaderMap,
     Json(body): Json<AllowlistIn>,
 ) -> Response {
-    let token = match authorise(&state, &headers, Scope::Allowlist) {
+    let token = match authorise(&state, &headers, ApiScope::Allowlist).await {
         Ok(t) => t,
         Err(r) => return r,
     };
     let scope = body.scope.unwrap_or(AllowlistScope::Local);
-    if let Err(r) = check_publish(token, scope) {
+    if let Err(r) = check_publish(&token, scope) {
         return r;
     }
     let behaviors = match body
@@ -470,7 +487,7 @@ async fn allowlist_remove(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    let token = match authorise(&state, &headers, Scope::Allowlist) {
+    let token = match authorise(&state, &headers, ApiScope::Allowlist).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -479,7 +496,7 @@ async fn allowlist_remove(
         Ok(None) => return allowlist_error(AllowlistError::NotFound(id)),
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
     };
-    if let Err(r) = check_publish(token, existing.scope) {
+    if let Err(r) = check_publish(&token, existing.scope) {
         return r;
     }
     match allowlist::remove(&state, id).await {
@@ -493,12 +510,15 @@ async fn allowlist_remove(
 
 #[cfg(test)]
 mod tests {
-    use super::ct_eq;
+    use super::*;
 
     #[test]
-    fn constant_time_eq() {
-        assert!(ct_eq(b"abc", b"abc"));
-        assert!(!ct_eq(b"abc", b"abd"));
-        assert!(!ct_eq(b"abc", b"ab"));
+    fn token_hash() {
+        let t = generate_token();
+        assert!(t.starts_with("apti_") && t.len() == 48, "{t}");
+        assert_ne!(t, generate_token());
+        let h = hash_token("abc");
+        assert_eq!(h.len(), 128);
+        assert!(h.starts_with("ddaf35a193617aba"), "{h}");
     }
 }

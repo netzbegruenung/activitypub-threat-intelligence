@@ -1,6 +1,6 @@
 //! Terminal UI for aptid (Appendix D): follow actors, set per-operator trust,
 //! per-behaviour k/T/M and TLP, approve followers, work the review queue and
-//! manage allowlists.
+//! manage allowlists and REST API tokens.
 
 mod client;
 mod form;
@@ -42,7 +42,7 @@ enum Tab {
     Followers,
     Operators,
     Behaviors,
-    Tlp,
+    Tokens,
     Review,
     Allowlist,
     Active,
@@ -55,7 +55,7 @@ const TABS: [(Tab, &str); 10] = [
     (Tab::Followers, "Followers"),
     (Tab::Operators, "Operators"),
     (Tab::Behaviors, "Behaviours"),
-    (Tab::Tlp, "TLP"),
+    (Tab::Tokens, "Tokens"),
     (Tab::Review, "Review"),
     (Tab::Allowlist, "Allowlist"),
     (Tab::Active, "Active"),
@@ -64,7 +64,15 @@ const TABS: [(Tab, &str); 10] = [
 
 enum Modal {
     Form(Form),
-    Confirm { text: String, request: Request },
+    Confirm {
+        text: String,
+        request: Request,
+    },
+    /// A newly created token secret, shown exactly once.
+    Secret {
+        name: String,
+        secret: String,
+    },
 }
 
 #[derive(Default)]
@@ -75,6 +83,7 @@ struct Data {
     operators: Vec<OperatorInfo>,
     behaviors: Vec<BehaviorPolicyInfo>,
     tlp: Option<TlpSettings>,
+    tokens: Vec<ApiTokenInfo>,
     review: Vec<ReviewItem>,
     show_resolved: bool,
     allowlist: Vec<AllowlistEntry>,
@@ -198,6 +207,9 @@ impl App {
                 if let Some(Reply::Status(s)) = self.call(Request::Status) {
                     self.data.status = Some(s);
                 }
+                if let Some(Reply::TlpSettings(t)) = self.call(Request::GetTlpSettings) {
+                    self.data.tlp = Some(t);
+                }
             }
             Tab::Following => {
                 if let Some(Reply::Following(f)) = self.call(Request::ListFollowing) {
@@ -219,9 +231,9 @@ impl App {
                     self.data.behaviors = b;
                 }
             }
-            Tab::Tlp => {
-                if let Some(Reply::TlpSettings(t)) = self.call(Request::GetTlpSettings) {
-                    self.data.tlp = Some(t);
+            Tab::Tokens => {
+                if let Some(Reply::Tokens(t)) = self.call(Request::ListTokens) {
+                    self.data.tokens = t;
                 }
             }
             Tab::Review => {
@@ -266,11 +278,12 @@ impl App {
             Tab::Followers => self.data.followers.len(),
             Tab::Operators => self.data.operators.len(),
             Tab::Behaviors => self.data.behaviors.len(),
+            Tab::Tokens => self.data.tokens.len(),
             Tab::Review => self.data.review.len(),
             Tab::Allowlist => self.data.allowlist.len(),
             Tab::Active => self.data.active.len(),
             Tab::Lookup => self.data.lookup.as_ref().map_or(0, |l| l.evidence.len()),
-            Tab::Dashboard | Tab::Tlp => 0,
+            Tab::Dashboard => 0,
         }
     }
 
@@ -285,12 +298,26 @@ impl App {
         self.refresh();
     }
 
-    /// Execute an action request and refresh on success.
-    fn act(&mut self, req: Request, ok: &str) {
-        if let Some(Reply::Done) = self.call(req) {
-            self.info(ok);
-            self.refresh();
+    /// Execute an action request and refresh on success. Returns false if
+    /// the request failed.
+    fn act(&mut self, req: Request, ok: &str) -> bool {
+        match self.call(req) {
+            Some(Reply::Done) => self.info(ok),
+            Some(Reply::TokenCreated { token, secret }) => {
+                self.info(format!("{ok}: {}", token.name));
+                self.modal = Some(Modal::Secret {
+                    name: token.name,
+                    secret,
+                });
+            }
+            Some(_) => {
+                self.error("unexpected reply from daemon");
+                return false;
+            }
+            None => return false,
         }
+        self.refresh();
+        true
     }
 
     fn confirm(&mut self, text: String, request: Request) {
@@ -334,7 +361,9 @@ impl App {
                 self.refresh();
                 self.info("refreshed");
             }
-            KeyCode::Char('R') => self.act(Request::Recompute, "recomputed active list"),
+            KeyCode::Char('R') => {
+                self.act(Request::Recompute, "recomputed active list");
+            }
             KeyCode::Char(c) => self.tab_action(c),
             KeyCode::Enter => self.tab_action('\n'),
             _ => {}
@@ -418,9 +447,34 @@ impl App {
                     self.modal = Some(Modal::Form(Form::behavior(b)));
                 }
             }
-            (Tab::Tlp, 'e' | '\n') => {
+            (Tab::Dashboard, 'e' | '\n') => {
                 if let Some(t) = &self.data.tlp {
                     self.modal = Some(Modal::Form(Form::tlp(t)));
+                }
+            }
+            (Tab::Tokens, 'a') => self.modal = Some(Modal::Form(Form::create_token())),
+            (Tab::Tokens, 'e' | '\n') => {
+                if let Some(t) = self.data.tokens.get(i) {
+                    self.modal = Some(Modal::Form(Form::edit_token(t)));
+                }
+            }
+            (Tab::Tokens, 'n') => {
+                if let Some(t) = self.data.tokens.get(i) {
+                    self.confirm(
+                        format!(
+                            "Generate a new secret for token {}? The current secret stops working immediately.",
+                            t.name
+                        ),
+                        Request::RotateToken { id: t.id },
+                    );
+                }
+            }
+            (Tab::Tokens, 'd') => {
+                if let Some(t) = self.data.tokens.get(i) {
+                    self.confirm(
+                        format!("Delete token {}? Clients using it lose access.", t.name),
+                        Request::DeleteToken { id: t.id },
+                    );
                 }
             }
             (Tab::Review, 'd') => self.resolve(i, ReviewAction::Dismiss),
@@ -489,9 +543,16 @@ impl App {
     fn on_modal_key(&mut self, modal: Modal, key: KeyEvent) {
         match modal {
             Modal::Confirm { text, request } => match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.act(request, "done"),
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.act(request, "done");
+                }
                 KeyCode::Char('n') | KeyCode::Esc => self.info("cancelled"),
                 _ => self.modal = Some(Modal::Confirm { text, request }),
+            },
+            // Require an explicit key so the secret is not dismissed by accident.
+            Modal::Secret { name, secret } => match key.code {
+                KeyCode::Enter | KeyCode::Esc => self.info(format!("token {name}: secret hidden")),
+                _ => self.modal = Some(Modal::Secret { name, secret }),
             },
             Modal::Form(mut form) => match key.code {
                 KeyCode::Esc => self.info("cancelled"),
@@ -502,10 +563,7 @@ impl App {
                             if let Request::Lookup { value } = req {
                                 self.lookup(value);
                             }
-                        } else if let Some(Reply::Done) = self.call(req) {
-                            self.info(form.done_message());
-                            self.refresh();
-                        } else {
+                        } else if !self.act(req, form.done_message()) {
                             // Keep the form open so the input can be corrected.
                             self.modal = Some(Modal::Form(form));
                         }
@@ -587,7 +645,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         Tab::Followers => draw_followers(f, app, main),
         Tab::Operators => draw_operators(f, app, main),
         Tab::Behaviors => draw_behaviors(f, app, main),
-        Tab::Tlp => draw_tlp(f, app, main),
+        Tab::Tokens => draw_tokens(f, app, main),
         Tab::Review => draw_review(f, app, main),
         Tab::Allowlist => draw_allowlist(f, app, main),
         Tab::Active => draw_active(f, app, main),
@@ -595,14 +653,14 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
 
     let keys = match app.current() {
-        Tab::Dashboard => "",
+        Tab::Dashboard => "e edit default TLP and AMBER recipients",
         Tab::Following => "a follow  d unfollow  s resync",
         Tab::Followers => "a approve  x reject/remove",
         Tab::Operators => {
             "e edit trust/weight  t toggle trusted  c clear behaviour policy  m map actor→operator"
         }
         Tab::Behaviors => "e edit k / T / M / TLP",
-        Tab::Tlp => "e edit default TLP and AMBER recipients",
+        Tab::Tokens => "a create  e edit scopes/TLP  n new secret  d delete",
         Tab::Review => "d dismiss  s suspend (b)  w allowlist (O)  h show resolved  ⏎ lookup",
         Tab::Allowlist => "a add  d remove",
         Tab::Active => "i toggle inactive  ⏎ lookup",
@@ -643,6 +701,29 @@ fn draw(f: &mut Frame, app: &mut App) {
                 area,
             );
         }
+        Some(Modal::Secret { name, secret }) => {
+            let area = centered(f.area(), 80, 9);
+            f.render_widget(Clear, area);
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(format!("Secret of API token {name}:")),
+                    Line::from(""),
+                    Line::from(secret.as_str()).yellow().bold(),
+                    Line::from(""),
+                    Line::from(
+                        "Copy it now. Only its SHA-512 hash is stored; it cannot be shown again.",
+                    ),
+                    Line::from("⏎ / Esc close").dark_gray(),
+                ])
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Token created "),
+                ),
+                area,
+            );
+        }
         None => {}
     }
 }
@@ -659,6 +740,12 @@ pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
+    let [status, tlp] = Layout::vertical([Constraint::Length(15), Constraint::Min(5)]).areas(area);
+    draw_status(f, app, status);
+    draw_tlp(f, app, tlp);
+}
+
+fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(s) = &app.data.status else {
         f.render_widget(
             Paragraph::new("no data").block(Block::default().borders(Borders::ALL)),
@@ -912,7 +999,8 @@ fn draw_tlp(f: &mut Frame, app: &mut App, area: Rect) {
     lines.push(Line::from(""));
     lines.push(
         Line::from(
-            "TLP:RED is never shared via AP-TI. Per-behaviour TLP is set in the Behaviours tab.",
+            "TLP:RED is never shared via AP-TI. Per-behaviour TLP is set in the Behaviours tab. \
+             Press e to edit.",
         )
         .dark_gray(),
     );
@@ -924,6 +1012,42 @@ fn draw_tlp(f: &mut Frame, app: &mut App, area: Rect) {
         ),
         area,
     );
+}
+
+fn draw_tokens(f: &mut Frame, app: &mut App, area: Rect) {
+    let rows = app
+        .data
+        .tokens
+        .iter()
+        .map(|t| {
+            Row::new(vec![
+                Cell::from(t.name.clone()),
+                Cell::from(
+                    t.scopes
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                tlp_cell(t.max_tlp),
+                Cell::from(ago(Some(t.created))),
+                Cell::from(ago(t.last_used)),
+            ])
+        })
+        .collect();
+    let t = table(
+        rows,
+        header_row(&["Name", "Scopes", "Max TLP", "Created", "Last used"]),
+        vec![
+            Constraint::Percentage(30),
+            Constraint::Fill(1),
+            Constraint::Length(18),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ],
+        " REST API tokens (only SHA-512 hashes are stored) ",
+    );
+    f.render_stateful_widget(t, area, &mut app.table);
 }
 
 fn draw_review(f: &mut Frame, app: &mut App, area: Rect) {

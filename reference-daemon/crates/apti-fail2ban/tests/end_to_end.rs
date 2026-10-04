@@ -3,12 +3,14 @@
 use std::io::Write;
 use std::path::Path;
 
+use apti_core::protocol::ApiScope;
+use apti_core::Tlp;
 use apti_fail2ban::client::AptidClient;
 use apti_fail2ban::config::Config;
 use apti_fail2ban::pull::Puller;
 use apti_fail2ban::push::Pusher;
 use apti_fail2ban::tail::Position;
-use aptid::{engine, publish, Daemon};
+use aptid::{api, db, engine, publish, Daemon};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
@@ -32,18 +34,6 @@ key_file = "{d}/key.pem"
 bind = "127.0.0.1:0"
 [api]
 bind = "127.0.0.1:0"
-[[api.tokens]]
-name = "push"
-token = "{PUSH}"
-scopes = ["push"]
-[[api.tokens]]
-name = "read"
-token = "{READ}"
-scopes = ["read"]
-[[api.tokens]]
-name = "allow"
-token = "{ALLOW}"
-scopes = ["allowlist"]
 [control]
 socket = "{d}/control.sock"
 [federation]
@@ -55,9 +45,23 @@ recompute_interval_secs = 3600
 "#,
         d = dir.display()
     );
-    aptid::start_with_listeners(aptid::config::Config::parse(&cfg).unwrap(), public, api)
+    let d = aptid::start_with_listeners(aptid::config::Config::parse(&cfg).unwrap(), public, api)
         .await
-        .unwrap()
+        .unwrap();
+    d.state
+        .db
+        .call(|c| {
+            let add = |name, secret, scope| {
+                db::insert_api_token(c, name, &api::hash_token(secret), &[scope], Tlp::Green)
+            };
+            add("push", PUSH, ApiScope::Push)?;
+            add("read", READ, ApiScope::Read)?;
+            add("allow", ALLOW, ApiScope::Allowlist)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    d
 }
 
 fn client_config(api: &str, dir: &Path) -> Config {
