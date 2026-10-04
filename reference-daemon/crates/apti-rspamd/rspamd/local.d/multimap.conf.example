@@ -1,0 +1,48 @@
+# Multimap rules for the maps served by apti-rspamd ([[maps.map]]).
+# Add to $LOCAL_CONFDIR/local.d/multimap.conf.
+#
+# IMPORTANT: every symbol defined here must be covered by
+# ingest.ignore_symbols (default "APTI_*"), otherwise IPs imported from peers
+# are re-published as your own Sightings.
+#
+# The scores are examples. They add evidence from trusted peers to the
+# message score; they should not reject on their own. The symbol option shows
+# the matched value; `apti-rspamd maps` prints the behaviour of each entry.
+
+# Sending IP listed by AP-TI.
+APTI_BAD_IP {
+  type = "ip";
+  map = "http://127.0.0.1:11380/maps/ip";
+  score = 4.0;
+  description = "Sender IP is listed by AP-TI";
+}
+
+# Host of a URL in the message (phishing, malware hosting, C2).
+APTI_BAD_URL {
+  type = "url";
+  regexp = true;
+  map = "http://127.0.0.1:11380/maps/url-domains";
+  score = 6.0;
+  description = "URL host is listed by AP-TI";
+}
+
+# Envelope sender domain.
+APTI_BAD_FROM {
+  type = "from";
+  filter = "email:domain";
+  regexp = true;
+  map = "http://127.0.0.1:11380/maps/sender-domains";
+  score = 3.0;
+  description = "Envelope sender domain is listed by AP-TI";
+}
+
+# Header From domain.
+APTI_BAD_HEADER_FROM {
+  type = "header";
+  header = "From";
+  filter = "email:domain";
+  regexp = true;
+  map = "http://127.0.0.1:11380/maps/sender-domains";
+  score = 3.0;
+  description = "From header domain is listed by AP-TI";
+}

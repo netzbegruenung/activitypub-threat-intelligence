@@ -1,0 +1,28 @@
+[package]
+name = "apti-rspamd"
+description = "Rspamd connector for the AP-TI reference daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apti-core.workspace = true
+anyhow.workspace = true
+axum = "0.8"
+chrono.workspace = true
+clap.workspace = true
+httpdate = "1"
+ipnet = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+aptid = { path = "../aptid" }
+tempfile = "3"
