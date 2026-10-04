@@ -31,6 +31,20 @@ impl Default for NormPolicy {
     }
 }
 
+impl NormPolicy {
+    /// Policy for local allowlist entries: any prefix length, special-purpose
+    /// values allowed. Shared by aptid and allowlist clients so that both
+    /// derive the same normal form.
+    pub fn lenient() -> Self {
+        Self {
+            min_v4_prefix: 0,
+            min_v6_prefix: 0,
+            reject_special_purpose: false,
+            allow_documentation: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NormError {
     #[error("empty value")]

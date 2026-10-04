@@ -139,6 +139,7 @@ The [`reference-daemon`](reference-daemon/) Cargo workspace contains:
 | `aptid` | Daemon: ActivityPub federation, SQLite storage, internal REST API for sensors and enforcement, management control socket. |
 | `apti-tui` | Terminal UI for following peers, setting trust, working through the review queue and managing allowlists. |
 | `apti-fail2ban` | Connector: reports fail2ban bans to `aptid` and writes the active list back to files that fail2ban bans from. |
+| `apti-allowlist` | Connector: keeps the local allowlist in sync with a hand-edited text file (append or source-of-truth mode). |
 
 A typical deployment works like this:
 

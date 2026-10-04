@@ -517,6 +517,7 @@ async fn resolve_review(state: &AppState, id: i64, action: ReviewAction) -> anyh
         tlp: None,
         valid_until: None,
         summary: Some(format!("review #{id}: {resolution}")),
+        source: None,
         object_id: None,
         created: Utc::now(),
     };

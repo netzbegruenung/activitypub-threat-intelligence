@@ -201,9 +201,18 @@ fn sighting_from(
     }
 }
 
+/// Publish everything queued since the last batch: Sightings from pending
+/// observations and queued Opinion activities. Returns the number of
+/// objects published.
+pub async fn run_batch(state: &AppState) -> anyhow::Result<usize> {
+    let sightings = publish_sightings(state).await?;
+    let opinions = publish_opinions(state).await?;
+    Ok(sightings + opinions)
+}
+
 /// Turn pending observations into Sightings and publish them. At most one
 /// Sighting update per observable and behaviour per batch.
-pub async fn run_batch(state: &AppState) -> anyhow::Result<usize> {
+async fn publish_sightings(state: &AppState) -> anyhow::Result<usize> {
     let pending = state.db.call(|c| db::pending_observations(c)).await?;
     if pending.is_empty() {
         return Ok(0);
@@ -257,6 +266,61 @@ pub async fn run_batch(state: &AppState) -> anyhow::Result<usize> {
     Ok(n)
 }
 
+/// Send the queued `Create`, `Update` and `Delete` activities of own
+/// Opinions (allowlist entries), grouped into as few activities as possible.
+/// `Create`/`Update` carry the object as stored now, so several changes
+/// within one interval become one activity per object.
+async fn publish_opinions(state: &AppState) -> anyhow::Result<usize> {
+    let pending = state
+        .db
+        .call(|c| {
+            let mut out = Vec::new();
+            for p in db::pending_opinions(c)? {
+                let stored = db::get_evidence(c, &p.object_id)?;
+                out.push((p, stored));
+            }
+            Ok(out)
+        })
+        .await?;
+    type Key = (&'static str, Tlp, Vec<String>);
+    let mut groups: BTreeMap<Key, Vec<(Value, (String, i64))>> = BTreeMap::new();
+    let mut orphans = Vec::new();
+    for (p, stored) in pending {
+        let sent = (p.object_id.clone(), p.version);
+        let Some(stored) = stored else {
+            orphans.push(sent);
+            continue;
+        };
+        let (kind, object) = match p.kind.as_str() {
+            "Delete" => ("Delete", json!(p.object_id)),
+            _ if stored.deleted.is_some() => ("Delete", json!(p.object_id)),
+            "Create" => ("Create", object_json(&stored.object)),
+            _ => ("Update", object_json(&stored.object)),
+        };
+        groups
+            .entry((kind, stored.object.tlp, stored.audience))
+            .or_default()
+            .push((object, sent));
+    }
+    if !orphans.is_empty() {
+        state
+            .db
+            .call(move |c| db::clear_pending_opinions(c, &orphans))
+            .await?;
+    }
+    let mut n = 0;
+    for ((kind, tlp, audience), items) in groups {
+        let (objects, sent): (Vec<Value>, Vec<(String, i64)>) = items.into_iter().unzip();
+        n += objects.len();
+        publish(state, kind, objects, tlp, audience).await?;
+        state
+            .db
+            .call(move |c| db::clear_pending_opinions(c, &sent))
+            .await?;
+    }
+    Ok(n)
+}
+
 pub async fn batch_loop(state: Shared) {
     let mut tick = tokio::time::interval(Duration::from_secs(
         state.cfg.publish.batch_interval_secs.max(1),
@@ -266,7 +330,7 @@ pub async fn batch_loop(state: Shared) {
         tick.tick().await;
         match run_batch(&state).await {
             Ok(0) => {}
-            Ok(n) => tracing::info!("published {n} sighting(s)"),
+            Ok(n) => tracing::info!("published {n} object(s)"),
             Err(e) => tracing::error!("batch failed: {e:#}"),
         }
     }

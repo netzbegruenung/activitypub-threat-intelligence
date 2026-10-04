@@ -342,6 +342,9 @@ pub struct AllowlistOut {
     pub valid_until: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Who manages the entry; never published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Id of the published Opinion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_id: Option<String>,
@@ -359,6 +362,7 @@ impl From<AllowlistEntry> for AllowlistOut {
             tlp: e.tlp,
             valid_until: e.valid_until,
             summary: e.summary,
+            source: e.source,
             object_id: e.object_id,
             created: e.created,
         }
@@ -376,7 +380,10 @@ pub struct AllowlistIn {
     pub behaviors: Vec<String>,
     pub tlp: Option<Tlp>,
     pub valid_until: Option<DateTime<Utc>>,
+    /// Rationale; published with the Opinion.
     pub summary: Option<String>,
+    /// Who manages the entry (e.g. a sync tool); never published.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -467,6 +474,7 @@ async fn allowlist_add(
         tlp: body.tlp,
         valid_until: body.valid_until,
         summary: body.summary,
+        source: body.source,
     };
     match allowlist::add(&state, entry).await {
         Ok((e, created)) => {

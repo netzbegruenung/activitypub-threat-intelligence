@@ -95,6 +95,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "apti-allowlist"
+version = "2026.10.3"
+dependencies = [
+ "anyhow",
+ "apti-core",
+ "aptid",
+ "chrono",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "apti-core"
 version = "2026.10.3"
 dependencies = [

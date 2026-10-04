@@ -1,0 +1,52 @@
+# apti-allowlist example configuration.
+
+[aptid]
+# aptid internal REST API ([api].bind in the aptid config).
+url = "http://127.0.0.1:8081"
+# Token with scope "allowlist". Create it in apti-tui (Tokens tab); the
+# secret is shown only once. Set either token or token_file.
+token = "apti_change-me-allowlist"
+# token_file = "/etc/apti-allowlist/token"
+timeout_secs = 20
+
+[file]
+# One IP address, CIDR prefix or domain per line. "#" starts a comment;
+# blank lines are ignored. Entries apply to all behaviours. Local entries
+# never expire; published entries are valid for valid_for_days and renewed
+# while the tool runs.
+path = "/etc/aptid/allowlist.txt"
+# Internal source recorded on the entries this tool creates (never
+# published). In source-of-truth mode only entries with this source are
+# removed. Use a distinct value per file. Default: "apti-allowlist:<path>".
+# source = "apti-allowlist:/etc/aptid/allowlist.txt"
+# Rationale stored with the entries. Published entries carry it as the
+# Opinion's summary, so followers see it.
+# summary = "Mail relays and monitoring of Example Org"
+# "local": entries only affect this aptid. "published": entries are also
+# federated to followers as strongly-disagree Opinions (the token then needs
+# the "publish" scope as well, and removals send Delete to followers).
+scope = "local"
+# Published entries only:
+# TLP of the Opinions: clear, green, amber or amber+strict. Changing it
+# re-publishes the entries (source of truth: the old ones are withdrawn).
+# tlp = "green"
+# Validity of the Opinions; they are extended (Update) once they expire
+# within renew_before_days (default: a tenth of valid_for_days).
+# valid_for_days = 90
+# renew_before_days = 9
+
+[sync]
+# How often the file is read. A change is applied once the file content
+# has been the same for two consecutive reads.
+poll_interval_secs = 5
+# Reconcile even if the file did not change, e.g. to restore entries that
+# were removed in apti-tui.
+resync_interval_secs = 300
+# Source of truth only: also remove local entries that this tool did not
+# create (TUI entries, "w" in the Review tab) if they are not in the file.
+prune_all = false
+# Source of truth only: if a reconcile would remove more entries than this,
+# no entries are removed and an error is logged (0 = no limit).
+max_removals = 100
+# Source of truth only: let a file without any value remove entries.
+allow_empty = false
