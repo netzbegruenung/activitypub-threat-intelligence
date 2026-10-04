@@ -357,6 +357,8 @@ impl App {
                     .select(Some((self.selected() + 20).min(n.saturating_sub(1))));
             }
             KeyCode::PageUp => self.table.select(Some(self.selected().saturating_sub(20))),
+            KeyCode::Home => self.table.select(Some(0)),
+            KeyCode::End => self.table.select(Some(self.rows().saturating_sub(1))),
             KeyCode::Char('r') => {
                 self.refresh();
                 self.info("refreshed");
@@ -670,7 +672,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         Paragraph::new(Line::from(vec![
             Span::styled(keys, Style::default().fg(Color::Gray)),
             Span::styled(
-                "   ←/→ tabs  r refresh  R recompute  q quit",
+                "   ←/→ tabs  Home/End first/last  r refresh  R recompute  q quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ])),
