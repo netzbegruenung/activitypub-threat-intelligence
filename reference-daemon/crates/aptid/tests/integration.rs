@@ -300,6 +300,111 @@ async fn local_pipeline() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn observation_tlp() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let lookup = |value: &str| {
+        let req = Request::Lookup {
+            value: value.into(),
+        };
+        let d = &d;
+        async move {
+            let Reply::Lookup(l) = ctl(d, req).await else {
+                panic!()
+            };
+            l.evidence
+                .iter()
+                .map(|e| e.tlp)
+                .collect::<std::collections::BTreeSet<_>>()
+        }
+    };
+
+    // The requested TLP replaces the behaviour default (green); RED is
+    // never accepted.
+    let (s, r) = push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.20", "behavior": "smtp-spam", "tlp": "clear"},
+            {"value": "45.13.7.21", "behavior": "smtp-spam"},
+            {"value": "45.13.7.22", "behavior": "smtp-spam", "tlp": "red"}
+        ]),
+    )
+    .await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(r["accepted"], 2, "{r}");
+    assert!(r["rejected"][0]["error"].as_str().unwrap().contains("RED"));
+    publish::run_batch(&d.state).await.unwrap();
+    engine::recompute(&d.state).await.unwrap();
+    let clear = active(&d, READ_CLEAR).await;
+    assert_eq!(clear.len(), 1, "{clear:?}");
+    assert_eq!(clear[0]["observableValue"], "45.13.7.20");
+    assert_eq!(clear[0]["tlp"], "clear");
+
+    // Within one batch the most restrictive request wins.
+    push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.23", "behavior": "smtp-spam", "tlp": "amber"},
+            {"value": "45.13.7.23", "behavior": "smtp-spam", "tlp": "clear"}
+        ]),
+    )
+    .await;
+    // A stricter TLP than the published Sighting's starts a new Sighting;
+    // a less strict one keeps the existing Sighting and its TLP.
+    push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.20", "behavior": "smtp-spam", "tlp": "amber"},
+            {"value": "45.13.7.21", "behavior": "smtp-spam", "tlp": "clear"}
+        ]),
+    )
+    .await;
+    publish::run_batch(&d.state).await.unwrap();
+    engine::recompute(&d.state).await.unwrap();
+    assert_eq!(lookup("45.13.7.23").await, [Tlp::Amber].into());
+    assert_eq!(lookup("45.13.7.20").await, [Tlp::Clear, Tlp::Amber].into());
+    assert_eq!(lookup("45.13.7.21").await, [Tlp::Green].into());
+    // The active entry carries the most restrictive supporting TLP.
+    let list = active(&d, READ).await;
+    let tlp_of = |v: &str| {
+        list.iter()
+            .find(|e| e["observableValue"] == v)
+            .map(|e| e["tlp"].clone())
+    };
+    assert_eq!(tlp_of("45.13.7.20"), Some(json!("amber")));
+    assert_eq!(tlp_of("45.13.7.21"), Some(json!("green")));
+    assert!(active(&d, READ_CLEAR).await.is_empty());
+
+    // A push without a TLP means the behaviour's TLP (green), not the least
+    // restrictive one: merged with a CLEAR request in the same batch, green
+    // wins; against a published CLEAR Sighting, it starts a new Sighting.
+    push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.24", "behavior": "smtp-spam"},
+            {"value": "45.13.7.24", "behavior": "smtp-spam", "tlp": "clear"},
+            {"value": "45.13.7.25", "behavior": "smtp-spam", "tlp": "clear"}
+        ]),
+    )
+    .await;
+    publish::run_batch(&d.state).await.unwrap();
+    push(
+        &d,
+        PUSH,
+        json!({"value": "45.13.7.25", "behavior": "smtp-spam"}),
+    )
+    .await;
+    publish::run_batch(&d.state).await.unwrap();
+    assert_eq!(lookup("45.13.7.24").await, [Tlp::Green].into());
+    assert_eq!(lookup("45.13.7.25").await, [Tlp::Clear, Tlp::Green].into());
+    d.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn federation_between_two_daemons() {
     let dir = tempfile::tempdir().unwrap();
     let a = spawn(dir.path(), "a").await;

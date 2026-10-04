@@ -232,11 +232,18 @@ async fn publish_sightings(state: &AppState) -> anyhow::Result<usize> {
                 .filter(|e| e.deleted.is_none()),
             None => None,
         };
-        let tlp = existing
-            .as_ref()
-            .map(|e| e.object.tlp)
+        // A Sighting keeps its TLP. If the sensor asks for a more
+        // restrictive one, a new Sighting is started instead, so the
+        // observation never reaches a wider audience than requested; the
+        // old Sighting ages out.
+        // Observations without a TLP (stored before it was resolved on push)
+        // use the behaviour's TLP.
+        let requested = obs
+            .tlp
             .or_else(|| behavior_tlp.get(&obs.behavior).copied().flatten())
             .unwrap_or(default_tlp);
+        let existing = existing.filter(|e| requested <= e.object.tlp);
+        let tlp = existing.as_ref().map_or(requested, |e| e.object.tlp);
         // An existing object keeps the audience it was first published to.
         let audience = match &existing {
             Some(e) => e.audience.clone(),

@@ -12,6 +12,7 @@ It follows the deployment model of Appendix D. The workspace contains these crat
 | `apti-tui` | TUI | Management client that talks to the daemon over the control socket. |
 | `apti-fail2ban` | connector | Pushes fail2ban bans to aptid and writes aptid's active list to files that fail2ban bans from. |
 | `apti-allowlist` | connector | Keeps aptid's local allowlist in sync with a text file (bulk import). |
+| `apti-rspamd` | connector | Reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to aptid, and serves aptid's active list to Rspamd as multimap files. |
 
 ## Build and run
 
@@ -95,8 +96,21 @@ curl -X POST https://ti-internal:8081/api/v1/observations \
 ```
 
 Fields: `value` (required), `behavior` (required), `observableType`, `port`,
-`service`, `seenAt` (RFC 3339, defaults to now) and `count` (defaults to 1).
-The request body can be a single object or an array of up to 1000.
+`service`, `seenAt` (RFC 3339, defaults to now), `count` (defaults to 1) and
+`tlp`. The request body can be a single object or an array of up to 1000.
+
+`tlp` sets the TLP of the Sighting and replaces the behaviour's publish TLP
+(`red` is rejected). It lets a sensor share different kinds of values with
+different audiences, e.g. sending IPs as `green` and spam domains as
+`clear`:
+
+- Within one batch, the most restrictive requested TLP of an observable wins.
+- A published Sighting keeps its TLP. A request for a less restrictive TLP
+  updates it without changing the TLP. A request for a more restrictive TLP
+  starts a new Sighting with that TLP, so the observation never reaches a
+  wider audience than requested; the old Sighting ages out.
+- Any `push` token can set any shareable TLP, so give push tokens only to
+  sensors you trust with the publish policy.
 
 The daemon normalises each value (IDNA A-labels, RFC 5952, CIDR). It rejects:
 
@@ -323,6 +337,141 @@ See [`crates/apti-allowlist/apti-allowlist.example.toml`](crates/apti-allowlist/
 - **Outages:** if aptid is unreachable, the reconcile is retried with
   backoff.
 
+## Rspamd connector (`apti-rspamd`)
+
+`apti-rspamd` connects Rspamd to aptid in both directions. It runs one local
+HTTP endpoint (`[server].bind`, default `127.0.0.1:11380`):
+
+| Path | Direction |
+|---|---|
+| `POST /v1/report` | A Lua plugin in Rspamd posts the result of each scanned message. IPs and, optionally, SPF-authenticated envelope-from domains that keep sending bad messages are reported to aptid as observations (`[ingest]`, needs a `push` token). |
+| `GET /maps/<name>` | aptid's active list as multimap files, refreshed every `maps.interval_secs` (`[maps]`, needs a `read` token). |
+
+| Subcommand | Effect |
+|---|---|
+| `run` | Serves the endpoint and runs the configured sections. |
+| `maps` | Fetches the active list once and prints all maps. |
+| `check` | Validates the config. |
+
+```sh
+apti-rspamd -c /etc/apti-rspamd/config.toml check
+apti-rspamd -c /etc/apti-rspamd/config.toml run
+```
+
+See [`crates/apti-rspamd/apti-rspamd.example.toml`](crates/apti-rspamd/apti-rspamd.example.toml).
+Keep the endpoint on loopback: the maps contain TLP-restricted data, limited
+by the read token's `max_tlp`.
+
+### Ingest
+
+1. Install the plugin and its settings (Debian paths; `CONFDIR` and
+   `LOCAL_CONFDIR` are both `/etc/rspamd`):
+
+   ```sh
+   cp crates/apti-rspamd/rspamd/lua.local.d/apti.lua /etc/rspamd/lua.local.d/
+   cp crates/apti-rspamd/rspamd/modules.local.d/apti.conf /etc/rspamd/modules.local.d/
+   ```
+
+   Set `secret` in `apti.conf` to `ingest.report_secret`. The plugin
+   registers the idempotent symbol `APTI_REPORT`, which runs after scoring.
+   For each message with a score of at least its `min_score` it sends the
+   sending IP, the envelope-from domain, the score, the action, the names
+   and scores of all symbols that fired (also those with score 0) and
+   whether the sender authenticated. Local senders are skipped, and
+   failures never affect mail processing.
+
+2. A message is **bad** if its score, minus the score of the symbols in
+   `ignore_symbols`, is at least `min_score`. An IP that sends `min_messages`
+   bad messages within `window_secs` is reported as an observation with
+   `behavior` (default `smtp-spam`), `service`, `port`, `tlp` and the number
+   of bad messages as `count`. While it keeps sending, it is reported again
+   at most once per `report_interval_secs`.
+
+- **Skipped senders:** authenticated users (`ignore_authenticated`),
+  special-purpose addresses and `ignore_networks` (own relays, backup MX).
+  aptid also rejects allowlisted values.
+- **IPv6** senders are tracked and reported as their `ipv6_prefix` (default
+  /64; aptid accepts /48 and longer).
+- **Batching and outages:** reports are sent every `batch_interval_secs`, at
+  most 1000 per request. If aptid is unreachable they stay queued (bounded by
+  `max_queue`) and are retried with backoff. The counters are in memory only;
+  `max_tracked` bounds how many IPs and domains are tracked.
+- **TLP:** `ingest.tlp` and `ingest.envelope_from.tlp` set the TLP of the
+  reported IPs and domains separately (see the `tlp` field of
+  [push observations](#push-observations-scope-push)). Unset, aptid uses the
+  behaviour's publish TLP.
+
+#### Envelope-from domains
+
+With `[ingest.envelope_from]` the domain of the SMTP envelope sender
+(`MAIL FROM`) of bad messages is reported too, as `domain-name` with its own
+`behavior` (default `smtp-spam`) and `tlp`. The exact domain is reported,
+never its parent. A message counts for its domain only if:
+
+- it is bad (same rule as for IPs) and has a non-empty envelope sender
+  (bounces are skipped);
+- every symbol in `require_symbols` fired, by default `R_SPF_ALLOW`.
+  The envelope sender can be forged freely; an SPF pass means the domain
+  authorised the sending IP, so the domain owner is responsible;
+- no symbol in `skip_symbols` fired, by default `FREEMAIL_ENVFROM` and
+  `DISPOSABLE_ENVFROM`, which Rspamd sets for shared mail providers;
+- the domain passes aptid's normalisation and is not in `ignore_domains`
+  (which also matches subdomains).
+
+A domain with `min_messages` such messages from at least `min_senders`
+distinct senders within `window_secs` is reported, at most once per
+`report_interval_secs` (both default to a day).
+
+- **`ignore_domains`:** add your own domains and the bounce domains of mail
+  service providers. Their SPF records authorise the provider's servers for
+  all customers; the example config lists common ones. Rspamd's freemail
+  list is incomplete (e.g. `mailbox.org` was missing in the 4.2.1 maps), so
+  add the providers your users see.
+- **Shared SPF:** SPF records that include large platforms let other
+  customers of the platform pass SPF for the domain. Raise `min_messages`
+  or `min_senders` if that is a concern, and set `local_weight` below `k`
+  in aptid to require confirmation from peers.
+
+> **Feedback loop:** the symbols of the multimaps fed by `[maps]` must match
+> `ignore_symbols` (default `APTI_*`). Otherwise a message that is bad only
+> because a peer listed its sender would be published again as your own
+> Sighting.
+
+### Maps
+
+Add the rules of
+[`rspamd/local.d/multimap.conf.example`](crates/apti-rspamd/rspamd/local.d/multimap.conf.example)
+to `/etc/rspamd/local.d/multimap.conf`:
+
+| Symbol | Matches | Map (example config) |
+|---|---|---|
+| `APTI_BAD_IP` | sending IP | `ip`: all behaviours |
+| `APTI_BAD_URL` | hosts of URLs in the message | `url-domains`: phishing, malware-hosting, command-and-control |
+| `APTI_BAD_FROM` | envelope sender domain | `sender-domains`: smtp-spam |
+| `APTI_BAD_HEADER_FROM` | `From` header domain | `sender-domains` |
+
+Each `[[maps.map]]` selects entries by `kind` (`ip` or `domain`) and
+behaviour. Entries flagged for review are left out unless
+`include_flagged = true`.
+
+```
+# apti-rspamd map url-domains
+# phishing
+/(^|\.)phish\.example\.com$/i
+```
+
+- **IP maps** list addresses and CIDR prefixes (radix map). **Domain maps**
+  are regexp maps (`regexp = true` in multimap). A domain whose entry has
+  `includeSubdomains` also matches its subdomains.
+- **Behaviours** are written as a comment above each entry, because
+  multimap reads a value after the key as a symbol name.
+- **Caching:** responses carry `ETag`, `Last-Modified` and `Expires`.
+  Unchanged maps are answered with `304`. Rspamd checks HTTP maps at most
+  every `map_watch_interval` (5 minutes by default), so a change can take
+  that long to reach Rspamd.
+- **Outages:** if aptid is unreachable, the maps are rendered from the last
+  fetched list, so entries still drop out at their effective expiry.
+
 ## ActivityPub endpoints
 
 | Path | Description |
@@ -377,7 +526,7 @@ Switch tabs with `←`/`→` or the number keys. Global keys: `r` refresh,
 | 8 HTTP signatures | `aptid/src/httpsig.rs` |
 | 9 Aggregation, 11 retention | `aptid/src/engine.rs`, `aptid/src/api.rs` |
 | Appendix D control socket | `aptid/src/control.rs`, `apti-tui` |
-| Appendix D internal API: sensors and enforcement | `aptid/src/api.rs`, `aptid/src/allowlist.rs`, `apti-fail2ban` |
+| Appendix D internal API: sensors and enforcement | `aptid/src/api.rs`, `aptid/src/allowlist.rs`, `apti-fail2ban`, `apti-rspamd` |
 
 ## Tests
 
@@ -394,6 +543,9 @@ cargo test --workspace
 - **`crates/aptid/tests/integration.rs`:**
   - **Local pipeline:** the full path through the REST API, the batcher, the
     engine and the control socket.
+  - **Observation TLP:** requested TLPs replace the behaviour default, RED
+    is rejected, the most restrictive request in a batch wins, and a
+    stricter request starts a new Sighting.
   - **Two daemons:** they federate over localhost: WebFinger follow, manual
     approval, Accept, a pull sync that reveals GREEN content after acceptance,
     inbox `Create` and `Update`, verified operator mapping, the untrusted
@@ -423,6 +575,23 @@ cargo test --workspace
     for a stable file, an outage, and published entries (TLP, summary
     published but source not, one batched `Create`, rejected values,
     renewal, TLP change, missing `publish` scope).
+- **`crates/apti-rspamd`:**
+  - **Unit tests:** config validation, report parsing, the reputation
+    window (ignored symbols, cooldown, IPv6 prefixes, skipped senders,
+    bounded state), the envelope-from rule (SPF required, zero-score skip
+    symbols, ignored and invalid domains, distinct senders, TLP per rule),
+    map rendering and conditional requests.
+  - **End-to-end test** against an in-process aptid: reports → push →
+    Sighting → map file, including the shared secret, the feedback-loop
+    guard, a forged and an authenticated envelope sender, separate TLPs for
+    IPs and domains, an allowlist that removes the IP from the map, `304`
+    responses and an outage.
+  - **Manual check:** the Lua plugin and the multimap rules were verified
+    with Rspamd 4.2.1: all four symbols match, a message that is bad only
+    because of `APTI_*` symbols is not reported, and repeated spam is. With
+    real SPF records: an SPF-authenticated envelope-from domain is reported
+    with its own TLP, a forged one is skipped, and `gmail.com` is skipped
+    via the zero-score `FREEMAIL_ENVFROM`.
 
 ## Limitations
 

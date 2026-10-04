@@ -207,6 +207,10 @@ CREATE TABLE pending_opinions (
     queued TEXT NOT NULL
 );
 "#,
+    r#"
+-- TLP requested by the sensor; NULL = the behaviour's publish TLP.
+ALTER TABLE observations ADD COLUMN tlp TEXT;
+"#,
 ];
 
 #[derive(Clone)]
@@ -968,18 +972,43 @@ pub struct Observation {
     pub last_seen: DateTime<Utc>,
     pub count: u64,
     pub sighting_id: Option<String>,
+    /// TLP requested by the sensor, or the behaviour's publish TLP if it
+    /// sent none. `None` only on rows stored before the push API resolved it.
+    pub tlp: Option<Tlp>,
+}
+
+/// SQL rank of a TLP column, ordered like [`Tlp`].
+fn tlp_rank_sql(col: &str) -> String {
+    format!(
+        "CASE {col} WHEN 'clear' THEN 0 WHEN 'green' THEN 1 WHEN 'amber' THEN 2 \
+         WHEN 'amber+strict' THEN 3 ELSE 4 END"
+    )
 }
 
 pub fn add_observation(c: &Connection, o: &Observation) -> anyhow::Result<()> {
-    c.execute(
+    // Within one batch the most restrictive requested TLP wins; once
+    // published, the next observation's TLP starts afresh. The push API
+    // always sets a TLP; NULL only remains on rows stored before that.
+    let sql = format!(
         "INSERT INTO observations (observable_type, observable_value, behavior, port, service,
-             first_seen, last_seen, count, pending)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+             first_seen, last_seen, count, pending, tlp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
          ON CONFLICT(observable_type, observable_value, behavior) DO UPDATE SET
              port = COALESCE(excluded.port, port), service = COALESCE(excluded.service, service),
              first_seen = MIN(first_seen, excluded.first_seen),
              last_seen = MAX(last_seen, excluded.last_seen),
-             count = count + excluded.count, pending = 1",
+             count = count + excluded.count,
+             tlp = CASE
+                 WHEN pending = 0 OR tlp IS NULL THEN excluded.tlp
+                 WHEN excluded.tlp IS NULL THEN tlp
+                 WHEN {} > {} THEN excluded.tlp
+                 ELSE tlp END,
+             pending = 1",
+        tlp_rank_sql("excluded.tlp"),
+        tlp_rank_sql("tlp")
+    );
+    c.execute(
+        &sql,
         params![
             o.observable_type.as_str(),
             o.observable_value,
@@ -988,7 +1017,8 @@ pub fn add_observation(c: &Connection, o: &Observation) -> anyhow::Result<()> {
             o.service,
             ts(o.first_seen),
             ts(o.last_seen),
-            o.count as i64
+            o.count as i64,
+            o.tlp.map(Tlp::as_str)
         ],
     )?;
     Ok(())
@@ -997,7 +1027,7 @@ pub fn add_observation(c: &Connection, o: &Observation) -> anyhow::Result<()> {
 pub fn pending_observations(c: &Connection) -> anyhow::Result<Vec<Observation>> {
     let mut stmt = c.prepare(
         "SELECT observable_type, observable_value, behavior, port, service, first_seen, last_seen,
-             count, sighting_id FROM observations WHERE pending = 1",
+             count, sighting_id, tlp FROM observations WHERE pending = 1",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -1014,6 +1044,7 @@ pub fn pending_observations(c: &Connection) -> anyhow::Result<Vec<Observation>> 
                 last_seen: parse_ts(&r.get::<_, String>(6)?),
                 count: r.get::<_, i64>(7)? as u64,
                 sighting_id: r.get(8)?,
+                tlp: r.get::<_, Option<String>>(9)?.and_then(|t| t.parse().ok()),
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -1643,6 +1674,7 @@ mod tests {
                 last_seen: now,
                 count: 1,
                 sighting_id: None,
+                tlp: None,
             };
             add_observation(c, &obs)?;
             let read = pending_observations(c)?.remove(0);

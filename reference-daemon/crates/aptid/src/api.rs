@@ -21,7 +21,8 @@ use sha2::{Digest, Sha512};
 
 use crate::allowlist::{self, AllowlistError};
 use crate::db::{self, Observation};
-use crate::engine::LocalAllowlist;
+use crate::engine::{self, LocalAllowlist};
+use crate::publish;
 use crate::state::Shared;
 
 pub fn router(state: Shared) -> Router {
@@ -106,6 +107,8 @@ pub struct ObservationIn {
     pub seen_at: Option<DateTime<Utc>>,
     /// Defaults to 1.
     pub count: Option<u64>,
+    /// TLP of the Sighting; defaults to the behaviour's publish TLP.
+    pub tlp: Option<Tlp>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +156,13 @@ async fn push(
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
     };
     let allow = LocalAllowlist::new(&state, &allow_db, now);
+    // A missing TLP means the behaviour's TLP. Resolve it here so stored
+    // observations always carry a real label to merge and compare.
+    let (behavior_tlp, default_tlp) =
+        match tokio::try_join!(engine::load_policy(&state), publish::tlp_settings(&state)) {
+            Ok(((_, b), (d, _))) => (b, d),
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
+        };
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
     for (index, o) in items.into_iter().enumerate() {
@@ -188,6 +198,10 @@ async fn push(
             rejected.push(reject("count must be >= 1".into()));
             continue;
         }
+        if o.tlp == Some(Tlp::Red) {
+            rejected.push(reject("TLP:RED is never shared".into()));
+            continue;
+        }
         if o.service.as_ref().is_some_and(|s| {
             s.is_empty()
                 || s.len() > 63
@@ -206,6 +220,11 @@ async fn push(
             last_seen: seen,
             count: o.count.unwrap_or(1),
             sighting_id: None,
+            tlp: Some(
+                o.tlp
+                    .or_else(|| behavior_tlp.get(&behavior).copied().flatten())
+                    .unwrap_or(default_tlp),
+            ),
         });
     }
     let n = accepted.len();

@@ -1,0 +1,112 @@
+# apti-rspamd example configuration.
+
+[aptid]
+# aptid internal REST API ([api].bind in the aptid config).
+url = "http://127.0.0.1:8081"
+# Token with scope "push" (needed by [ingest]). Create tokens in apti-tui
+# (Tokens tab); the secret is shown only once.
+push_token = "apti_change-me-rspamd-push"
+# Token with scope "read" (needed by [maps]). Its max_tlp limits what Rspamd
+# gets to see.
+read_token = "apti_change-me-rspamd-read"
+timeout_secs = 20
+
+[server]
+# Endpoint for the Lua plugin (/v1/report) and multimap (/maps/<name>).
+# Keep it on loopback: the maps contain TLP-restricted data.
+bind = "127.0.0.1:11380"
+
+# ---------------------------------------------------------------- ingest
+# Turn Rspamd scan results into observations of the sending IP and,
+# optionally, the envelope-from domain.
+[ingest]
+# Must match `secret` in the Rspamd module config (modules.local.d/apti.conf).
+report_secret = "change-me-to-a-long-random-string"
+# A message is bad if its score minus the score of ignore_symbols reaches
+# this. The plugin's min_score must not be higher.
+min_score = 10.0
+# Report an IP after this many bad messages within window_secs ...
+min_messages = 3
+window_secs = 3600
+# ... and at most once per report_interval_secs while it keeps sending.
+report_interval_secs = 3600
+# IPv6 senders are tracked and reported as this prefix (48..=128).
+ipv6_prefix = 64
+behavior = "smtp-spam"
+service = "smtp"
+port = 25
+# TLP of the reported IPs (clear, green, amber, amber+strict). Unset = the
+# behaviour's publish TLP in aptid. Sending IPs are mostly compromised
+# residential hosts (personal data); the spec recommends green or stricter.
+tlp = "green"
+# IMPORTANT: the symbols of the multimaps fed by [maps] must be listed here,
+# otherwise IPs imported from peers are re-published as your own Sightings
+# (feedback loop). A trailing * matches a prefix.
+ignore_symbols = ["APTI_*"]
+# Never report these senders, e.g. own relays, backup MX, forwarders.
+# Allowlist entries in aptid are honoured as well.
+ignore_networks = []
+ignore_authenticated = true
+# IPs and domains tracked at once.
+max_tracked = 100000
+batch_interval_secs = 30
+max_queue = 10000
+
+# Report the envelope-from (SMTP MAIL FROM) domains of bad messages.
+# Remove the section to report IPs only.
+[ingest.envelope_from]
+behavior = "smtp-spam"
+# TLP of the reported domains, independent of ingest.tlp.
+tlp = "clear"
+# Report a domain after this many bad messages within window_secs, sent
+# from at least min_senders distinct IPs (IPv6: ipv6_prefix) ...
+min_messages = 3
+min_senders = 1
+window_secs = 86400
+# ... and at most once per report_interval_secs.
+report_interval_secs = 86400
+# IMPORTANT: the envelope sender is forged easily. Count a message only if
+# all of these symbols fired; R_SPF_ALLOW means the domain authorised the
+# sending IP.
+require_symbols = ["R_SPF_ALLOW"]
+# Skip the message if any of these fired (shared freemail and disposable
+# providers).
+skip_symbols = ["FREEMAIL_ENVFROM", "DISPOSABLE_ENVFROM"]
+# Never report these domains or their subdomains: your own domains and the
+# bounce domains of mail service providers whose SPF passes for all their
+# customers. aptid's allowlist applies as well.
+ignore_domains = [
+  "amazonses.com",
+  "sendgrid.net",
+  "mcsv.net",
+  "mailgun.org",
+  "sparkpostmail.com",
+  "mandrillapp.com",
+  "bounces.google.com",
+  "outlook.com",
+]
+
+# ---------------------------------------------------------------- maps
+# Serve the active list as multimap files (local.d/multimap.conf).
+[maps]
+interval_secs = 60
+
+# Sending IPs of any behaviour → APTI_BAD_IP.
+[[maps.map]]
+name = "ip"
+kind = "ip"
+behaviors = []
+# Also list entries flagged for review (trusted disagreement).
+include_flagged = false
+
+# Hosts of URLs in the message → APTI_BAD_URL.
+[[maps.map]]
+name = "url-domains"
+kind = "domain"
+behaviors = ["phishing", "malware-hosting", "command-and-control"]
+
+# Envelope and header From domains → APTI_BAD_FROM, APTI_BAD_HEADER_FROM.
+[[maps.map]]
+name = "sender-domains"
+kind = "domain"
+behaviors = ["smtp-spam"]

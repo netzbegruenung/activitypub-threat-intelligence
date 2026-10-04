@@ -146,6 +146,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "apti-rspamd"
+version = "2026.10.3"
+dependencies = [
+ "anyhow",
+ "apti-core",
+ "aptid",
+ "axum",
+ "chrono",
+ "clap",
+ "httpdate",
+ "ipnet",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "apti-tui"
 version = "2026.10.3"
 dependencies = [

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/apti-core", "crates/aptid", "crates/apti-tui", "crates/apti-fail2ban", "crates/apti-allowlist"]
+members = ["crates/apti-core", "crates/aptid", "crates/apti-tui", "crates/apti-fail2ban", "crates/apti-allowlist", "crates/apti-rspamd"]
 
 [workspace.package]
 version = "2026.10.3"
