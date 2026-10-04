@@ -26,12 +26,7 @@ pub enum AllowlistError {
 
 /// Normalisation for local use: any prefix length, special-purpose allowed.
 pub fn lenient_norm() -> NormPolicy {
-    NormPolicy {
-        min_v4_prefix: 0,
-        min_v6_prefix: 0,
-        reject_special_purpose: false,
-        allow_documentation: true,
-    }
+    NormPolicy::lenient()
 }
 
 fn same_behaviors(a: &[apti_core::Behavior], b: &[apti_core::Behavior]) -> bool {

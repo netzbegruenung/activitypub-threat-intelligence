@@ -1,0 +1,35 @@
+# apti-allowlist example configuration.
+
+[aptid]
+# aptid internal REST API ([api].bind in the aptid config).
+url = "http://127.0.0.1:8081"
+# Token with scope "allowlist". Create it in apti-tui (Tokens tab); the
+# secret is shown only once. Set either token or token_file.
+token = "apti_change-me-allowlist"
+# token_file = "/etc/apti-allowlist/token"
+timeout_secs = 20
+
+[file]
+# One IP address, CIDR prefix or domain per line. "#" starts a comment;
+# blank lines are ignored. Entries apply to all behaviours and never expire.
+path = "/etc/aptid/allowlist.txt"
+# Summary recorded on the entries this tool creates. In source-of-truth mode
+# only entries with this summary are removed. Use a distinct value per file.
+# Default: "apti-allowlist:<path>".
+# summary = "apti-allowlist:/etc/aptid/allowlist.txt"
+
+[sync]
+# How often the file is read. A change is applied once the file content
+# has been the same for two consecutive reads.
+poll_interval_secs = 5
+# Reconcile even if the file did not change, e.g. to restore entries that
+# were removed in apti-tui.
+resync_interval_secs = 300
+# Source of truth only: also remove local entries that this tool did not
+# create (TUI entries, "w" in the Review tab) if they are not in the file.
+prune_all = false
+# Source of truth only: if a reconcile would remove more entries than this,
+# no entries are removed and an error is logged (0 = no limit).
+max_removals = 100
+# Source of truth only: let a file without any value remove entries.
+allow_empty = false

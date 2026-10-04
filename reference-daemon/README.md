@@ -3,7 +3,7 @@
 Reference implementation of the *ActivityPub Threat Intelligence Profile*
 ([`../proposal.md`](../proposal.md), draft-activitypub-threatintel-00).
 
-It follows the deployment model of Appendix D. The workspace contains three crates:
+It follows the deployment model of Appendix D. The workspace contains these crates:
 
 | Crate | Kind | Contents |
 |---|---|---|
@@ -11,6 +11,7 @@ It follows the deployment model of Appendix D. The workspace contains three crat
 | `aptid` | daemon | ActivityPub federation, SQLite storage, internal REST API, control socket. |
 | `apti-tui` | TUI | Management client that talks to the daemon over the control socket. |
 | `apti-fail2ban` | connector | Pushes fail2ban bans to aptid and writes aptid's active list to files that fail2ban bans from. |
+| `apti-allowlist` | connector | Keeps aptid's local allowlist in sync with a text file (bulk import). |
 
 ## Build and run
 
@@ -247,6 +248,49 @@ defaults are 1800 + 300 s, with `bantime = 3600`.
 If aptid is unreachable, nothing is written, so existing bans simply run out.
 Files are rotated to `.1` when they exceed `max_size_bytes`.
 
+## Allowlist file (`apti-allowlist`)
+
+`apti-allowlist` keeps the local allowlist in sync with a hand-edited text
+file through the REST API (needs an `allowlist` token). The file holds one IP
+address, CIDR prefix or domain per line; `#` starts a comment and blank lines
+are ignored. Entries apply to all behaviours and never expire.
+
+| Flag | Effect |
+|---|---|
+| `--append` | Values in the file are added; nothing is removed. |
+| `--source-of-truth` | Values are added, and entries this tool created are removed once their value is no longer in the file. |
+| `--once` | Reconcile once and exit, e.g. from cron. |
+| `--check` | Validates the config. |
+
+```sh
+apti-allowlist -c /etc/apti-allowlist/config.toml --check
+apti-allowlist -c /etc/apti-allowlist/config.toml --source-of-truth
+```
+
+See [`crates/apti-allowlist/apti-allowlist.example.toml`](crates/apti-allowlist/apti-allowlist.example.toml).
+
+- **Reconcile:** the whole file is read every `poll_interval_secs`. A change
+  is applied once the content is the same at two consecutive reads, so a
+  half-written file is not used. Every `resync_interval_secs` the file is
+  reconciled anyway, which restores entries removed in the TUI. Additions
+  are sent before removals.
+- **Present values:** a value counts as present only if an unexpired local
+  entry for all behaviours exists. A TUI entry restricted to some behaviours
+  does not count, and the tool adds its own entry.
+- **Ownership:** entries the tool creates carry the summary
+  `apti-allowlist:<path>` (`file.summary`). Source-of-truth mode removes
+  only these, unless `prune_all = true`, which removes every local entry
+  that is not in the file. Use a distinct summary per file if you run
+  several instances.
+- **Guards:** a missing or unreadable file changes nothing. A file without
+  values removes nothing unless `allow_empty = true`, and a reconcile that
+  would remove more than `max_removals` entries (default 100) removes none.
+  Invalid lines are logged and skipped.
+- **Domains** cover only themselves, not their subdomains (unlike
+  `policy.allowlist` in the aptid config).
+- **Outages:** if aptid is unreachable, the reconcile is retried with
+  backoff.
+
 ## ActivityPub endpoints
 
 | Path | Description |
@@ -335,6 +379,12 @@ cargo test --workspace
     followed by a restart.
   - **Manual check:** the shipped filter was verified with
     `fail2ban-regex` (fail2ban 1.1.0).
+- **`crates/apti-allowlist`:**
+  - **Unit tests:** config validation, file parsing and the reconcile plan
+    (restricted and expired entries, ownership, `prune_all`).
+  - **End-to-end tests** against an in-process aptid: import, edits,
+    restoring removed entries, the removal guards, append mode, waiting
+    for a stable file, and an outage.
 
 ## Limitations
 

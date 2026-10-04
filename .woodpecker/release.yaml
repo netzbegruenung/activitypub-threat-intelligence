@@ -31,8 +31,8 @@ steps:
       - cd reference-daemon
       - cargo build --workspace --release --locked
       - mkdir -p ../dist ../config-pkg
-      - for bin in aptid apti-tui apti-fail2ban; do cp "target/release/$$bin" "../dist/$$bin-$CI_COMMIT_TAG-linux-x86_64"; done
-      - cp config.example.toml crates/apti-fail2ban/apti-fail2ban.example.toml ../config-pkg/
+      - for bin in aptid apti-tui apti-fail2ban apti-allowlist; do cp "target/release/$$bin" "../dist/$$bin-$CI_COMMIT_TAG-linux-x86_64"; done
+      - cp config.example.toml crates/apti-fail2ban/apti-fail2ban.example.toml crates/apti-allowlist/apti-allowlist.example.toml ../config-pkg/
       - cp -r crates/apti-fail2ban/fail2ban ../config-pkg/
       - tar -czf "../dist/aptid-config-$CI_COMMIT_TAG.tar.gz" -C ../config-pkg .
       - cd ../dist && sha256sum * > SHA256SUMS
