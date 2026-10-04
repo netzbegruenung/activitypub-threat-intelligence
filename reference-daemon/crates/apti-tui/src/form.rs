@@ -33,6 +33,9 @@ pub struct Field {
     pub label: &'static str,
     pub value: String,
     pub hint: &'static str,
+    /// Allowed values; non-empty makes this a select instead of free text.
+    /// An empty option stands for "use the default".
+    pub options: Vec<String>,
 }
 
 pub struct Form {
@@ -48,8 +51,53 @@ fn field(label: &'static str, value: impl Into<String>, hint: &'static str) -> F
         label,
         value: value.into(),
         hint,
+        options: Vec::new(),
     }
 }
+
+/// A select field; falls back to the first option if `current` is not one.
+fn select(label: &'static str, options: Vec<String>, current: &str, hint: &'static str) -> Field {
+    let value = if options.iter().any(|o| o == current) {
+        current.to_string()
+    } else {
+        options.first().cloned().unwrap_or_default()
+    };
+    Field {
+        label,
+        value,
+        hint,
+        options,
+    }
+}
+
+/// TLP options; `default` prepends an empty "use the default" option.
+fn tlp_options(tlps: &[Tlp], default: bool) -> Vec<String> {
+    default
+        .then(String::new)
+        .into_iter()
+        .chain(tlps.iter().map(|t| t.as_str().to_string()))
+        .collect()
+}
+
+/// `*` (operator default) followed by every behaviour.
+fn behavior_options() -> Vec<String> {
+    std::iter::once("*".to_string())
+        .chain(Behavior::ALL.iter().map(|b| b.as_str().to_string()))
+        .collect()
+}
+
+fn strings(options: &[&str]) -> Vec<String> {
+    options.iter().map(|s| s.to_string()).collect()
+}
+
+/// All TLP levels, including RED (token read limits only).
+const ALL_TLP: [Tlp; 5] = [
+    Tlp::Clear,
+    Tlp::Green,
+    Tlp::Amber,
+    Tlp::AmberStrict,
+    Tlp::Red,
+];
 
 /// Parse `90`, `90s`, `15m`, `2h`, `7d`; empty means "default".
 pub fn parse_duration(s: &str) -> Result<Option<i64>, String> {
@@ -144,12 +192,18 @@ impl Form {
                 operator: o.id.clone(),
             },
             vec![
-                field(
+                select(
                     "Behaviour",
+                    behavior_options(),
                     "*",
-                    "* = operator default, or e.g. ssh-bruteforce",
+                    "* = operator default, or a specific behaviour",
                 ),
-                field("Trusted", if p.trusted { "yes" } else { "no" }, "yes / no"),
+                select(
+                    "Trusted",
+                    strings(&["yes", "no"]),
+                    if p.trusted { "yes" } else { "no" },
+                    "only trusted operators count towards the quorum",
+                ),
                 field(
                     "Weight",
                     p.weight.to_string(),
@@ -165,8 +219,9 @@ impl Form {
             FormKind::ClearOperatorPolicy {
                 operator: operator.to_string(),
             },
-            vec![field(
+            vec![select(
                 "Behaviour",
+                behavior_options(),
                 "*",
                 "* = operator default, or a behaviour",
             )],
@@ -211,12 +266,11 @@ impl Form {
                     o.max_age_secs.map(fmt_secs).unwrap_or_default(),
                     "max evidence age, e.g. 14d; empty = default (IP ≤ 90d)",
                 ),
-                field(
+                select(
                     "Publish TLP",
-                    b.default_tlp
-                        .map(|t| t.as_str().to_string())
-                        .unwrap_or_default(),
-                    "clear / green / amber / amber+strict; empty = global default",
+                    tlp_options(&Tlp::SHAREABLE, true),
+                    b.default_tlp.map(Tlp::as_str).unwrap_or_default(),
+                    "(default) = global default TLP",
                 ),
             ],
         )
@@ -227,10 +281,11 @@ impl Form {
             " TLP settings ",
             FormKind::Tlp,
             vec![
-                field(
+                select(
                     "Default TLP",
+                    tlp_options(&Tlp::SHAREABLE, false),
                     t.default_tlp.as_str(),
-                    "clear / green / amber / amber+strict",
+                    "TLP:RED is never shared",
                 ),
                 field(
                     "AMBER recipients",
@@ -247,13 +302,19 @@ impl Form {
             FormKind::Allowlist,
             vec![
                 field("Value", "", "IP, prefix or domain"),
-                field(
+                select(
                     "Scope",
+                    strings(&["local", "published"]),
                     "local",
                     "local (only us) / published (strongly-disagree Opinion)",
                 ),
                 field("Behaviours", "", "comma-separated; empty = all"),
-                field("TLP", "", "published only; empty = default TLP"),
+                select(
+                    "TLP",
+                    tlp_options(&Tlp::SHAREABLE, true),
+                    "",
+                    "published only; (default) = default TLP",
+                ),
                 field(
                     "Valid for",
                     "",
@@ -275,10 +336,11 @@ impl Form {
                     "read",
                     "comma-separated: push, read, allowlist, publish",
                 ),
-                field(
+                select(
                     "Max TLP",
+                    tlp_options(&ALL_TLP, false),
                     "green",
-                    "highest TLP readable: clear / green / amber / amber+strict / red",
+                    "highest TLP this token can read",
                 ),
             ],
         )
@@ -294,10 +356,11 @@ impl Form {
                     join_scopes(&t.scopes),
                     "comma-separated: push, read, allowlist, publish",
                 ),
-                field(
+                select(
                     "Max TLP",
+                    tlp_options(&ALL_TLP, false),
                     t.max_tlp.as_str(),
-                    "clear / green / amber / amber+strict / red",
+                    "highest TLP this token can read",
                 ),
             ],
         )
@@ -460,12 +523,27 @@ impl Form {
         match key.code {
             KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % n,
             KeyCode::BackTab | KeyCode::Up => self.focus = (self.focus + n - 1) % n,
+            _ if !self.fields[self.focus].options.is_empty() => self.on_select_key(key),
             KeyCode::Backspace => {
                 self.fields[self.focus].value.pop();
             }
             KeyCode::Char(c) => self.fields[self.focus].value.push(c),
             _ => {}
         }
+    }
+
+    fn on_select_key(&mut self, key: KeyEvent) {
+        let fl = &mut self.fields[self.focus];
+        let n = fl.options.len();
+        let i = fl.options.iter().position(|o| *o == fl.value).unwrap_or(0);
+        let i = match key.code {
+            KeyCode::Right | KeyCode::Char(' ') => (i + 1) % n,
+            KeyCode::Left => (i + n - 1) % n,
+            KeyCode::Home => 0,
+            KeyCode::End => n - 1,
+            _ => return,
+        };
+        fl.value = fl.options[i].clone();
     }
 
     pub fn draw(&self, f: &mut Frame) {
@@ -475,7 +553,7 @@ impl Form {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(self.title.as_str())
-            .title_bottom(" ⏎ submit  Tab next field  Esc cancel ");
+            .title_bottom(" ⏎ submit  Tab next field  ←/→ change option  Esc cancel ");
         let inner = block.inner(area);
         f.render_widget(block, area);
         let mut constraints: Vec<Constraint> =
@@ -489,12 +567,30 @@ impl Form {
             } else {
                 Style::default()
             };
-            let cursor = if focused { "▏" } else { "" };
-            let p = Paragraph::new(vec![
+            let input = if fl.options.is_empty() {
+                let cursor = if focused { "▏" } else { "" };
                 Line::from(vec![
                     Span::raw(fl.value.clone()),
                     Span::styled(cursor, Style::default().add_modifier(Modifier::SLOW_BLINK)),
-                ]),
+                ])
+            } else {
+                let value = if fl.value.is_empty() {
+                    "(default)"
+                } else {
+                    fl.value.as_str()
+                };
+                if focused {
+                    Line::from(vec![
+                        Span::styled("◀ ", style),
+                        Span::raw(value.to_string()),
+                        Span::styled(" ▶", style),
+                    ])
+                } else {
+                    Line::from(value.to_string())
+                }
+            };
+            let p = Paragraph::new(vec![
+                input,
                 Line::from(Span::styled(fl.hint, Style::default().fg(Color::DarkGray))),
             ])
             .block(
@@ -579,7 +675,9 @@ mod tests {
         let mut f = Form::create_token();
         f.fields[0].value = "firewall".into();
         f.fields[1].value = "Read, allowlist".into();
-        f.fields[2].value = "TLP:AMBER".into();
+        // Max TLP select starts at green; one step right is amber.
+        f.focus = 2;
+        f.on_key(KeyEvent::from(KeyCode::Right));
         let Request::CreateToken(t) = f.to_request().unwrap() else {
             panic!()
         };
@@ -589,5 +687,42 @@ mod tests {
         assert!(f.to_request().is_err());
         f.fields[1].value = "admin".into();
         assert!(f.to_request().is_err());
+    }
+
+    #[test]
+    fn select_keys() {
+        let mut f = Form::create_token();
+        f.focus = 2;
+        let key = |f: &mut Form, code| {
+            f.on_key(KeyEvent::from(code));
+            f.fields[2].value.clone()
+        };
+        assert_eq!(f.fields[2].value, "green");
+        assert_eq!(key(&mut f, KeyCode::Left), "clear");
+        assert_eq!(key(&mut f, KeyCode::Left), "red");
+        assert_eq!(key(&mut f, KeyCode::Right), "clear");
+        assert_eq!(key(&mut f, KeyCode::Char(' ')), "green");
+        assert_eq!(key(&mut f, KeyCode::End), "red");
+        assert_eq!(key(&mut f, KeyCode::Home), "clear");
+        assert_eq!(key(&mut f, KeyCode::Char('x')), "clear");
+        assert_eq!(key(&mut f, KeyCode::Backspace), "clear");
+    }
+
+    #[test]
+    fn selects_start_at_current_value() {
+        let f = Form::edit_token(&ApiTokenInfo {
+            id: 1,
+            name: "fw".into(),
+            scopes: vec![ApiScope::Read],
+            max_tlp: Tlp::AmberStrict,
+            created: Utc::now(),
+            last_used: None,
+        });
+        assert_eq!(f.fields[1].value, "amber+strict");
+        let f = Form::allowlist();
+        assert_eq!(f.fields[1].value, "local");
+        assert_eq!(f.fields[3].value, "");
+        assert_eq!(f.fields[3].options[0], "");
+        assert!(!f.fields[3].options.contains(&"red".to_string()));
     }
 }
