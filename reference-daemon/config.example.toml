@@ -2,7 +2,8 @@
 #
 # This file holds bootstrap settings and policy *defaults*. Policy edited at
 # runtime with apti-tui (trust, weights, k/T/M, TLP) is stored in the
-# database and takes precedence over the values below.
+# database and takes precedence over the values below. REST API tokens are
+# managed only in apti-tui.
 
 [instance]
 # Public base URL of the ActivityPub endpoints (terminate TLS in a reverse
@@ -29,25 +30,8 @@ max_body_bytes = 4194304
 [api]
 # Organisation-internal REST API. Never expose it to the Internet.
 bind = "127.0.0.1:8081"
-
-[[api.tokens]]
-name = "sensors"
-token = "change-me-sensors-0123456789"
-scopes = ["push"]
-
-[[api.tokens]]
-name = "firewall"
-token = "change-me-firewall-0123456789"
-scopes = ["read"]
-# Most restrictive TLP this client may receive.
-max_tlp = "amber"
-
-[[api.tokens]]
-name = "automation"
-token = "change-me-automation-0123456789"
-# "allowlist": manage local allowlist entries;
-# "publish": additionally create/remove published (federated) entries.
-scopes = ["read", "allowlist"]
+# Bearer tokens are created in apti-tui (Tokens tab). The daemon generates
+# the secret, shows it once and stores only its SHA-512 hash in the database.
 
 [control]
 # Management socket for apti-tui. Peers are checked with SO_PEERCRED:

@@ -2,7 +2,8 @@
 
 use apti_core::policy::{BehaviorOverride, OperatorPolicy, Threshold};
 use apti_core::protocol::{
-    AllowlistScope, BehaviorPolicyInfo, NewAllowlistEntry, OperatorInfo, Request, TlpSettings,
+    AllowlistScope, ApiScope, ApiTokenInfo, BehaviorPolicyInfo, NewAllowlistEntry, NewApiToken,
+    OperatorInfo, Request, TlpSettings,
 };
 use apti_core::{Behavior, Tlp};
 use chrono::{TimeDelta, Utc};
@@ -24,6 +25,8 @@ pub enum FormKind {
     Tlp,
     Allowlist,
     Lookup,
+    CreateToken,
+    EditToken { id: i64 },
 }
 
 pub struct Field {
@@ -91,6 +94,27 @@ fn parse_tlp_opt(s: &str) -> Result<Option<Tlp>, String> {
         "" => Ok(None),
         t => t.parse().map(Some),
     }
+}
+
+fn parse_scopes(s: &str) -> Result<Vec<ApiScope>, String> {
+    let scopes = s
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase().parse())
+        .collect::<Result<Vec<ApiScope>, _>>()?;
+    if scopes.is_empty() {
+        return Err("at least one scope is required".into());
+    }
+    Ok(scopes)
+}
+
+fn join_scopes(scopes: &[ApiScope]) -> String {
+    scopes
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl Form {
@@ -240,6 +264,45 @@ impl Form {
         )
     }
 
+    pub fn create_token() -> Self {
+        Self::new(
+            " Create API token ",
+            FormKind::CreateToken,
+            vec![
+                field("Name", "", "e.g. firewall; [A-Za-z0-9_.-], unique"),
+                field(
+                    "Scopes",
+                    "read",
+                    "comma-separated: push, read, allowlist, publish",
+                ),
+                field(
+                    "Max TLP",
+                    "green",
+                    "highest TLP readable: clear / green / amber / amber+strict / red",
+                ),
+            ],
+        )
+    }
+
+    pub fn edit_token(t: &ApiTokenInfo) -> Self {
+        Self::new(
+            format!(" Edit API token: {} ", t.name),
+            FormKind::EditToken { id: t.id },
+            vec![
+                field(
+                    "Scopes",
+                    join_scopes(&t.scopes),
+                    "comma-separated: push, read, allowlist, publish",
+                ),
+                field(
+                    "Max TLP",
+                    t.max_tlp.as_str(),
+                    "clear / green / amber / amber+strict / red",
+                ),
+            ],
+        )
+    }
+
     pub fn lookup() -> Self {
         Self::new(
             " Lookup ",
@@ -258,6 +321,8 @@ impl Form {
             FormKind::Tlp => "TLP settings saved",
             FormKind::Allowlist => "allowlist entry added",
             FormKind::Lookup => "",
+            FormKind::CreateToken => "token created",
+            FormKind::EditToken { .. } => "token updated",
         }
     }
 
@@ -371,6 +436,21 @@ impl Form {
                     value: self.v(0).to_string(),
                 }
             }
+            FormKind::CreateToken => {
+                if self.v(0).is_empty() {
+                    return Err("name is required".into());
+                }
+                Request::CreateToken(NewApiToken {
+                    name: self.v(0).to_string(),
+                    scopes: parse_scopes(self.v(1))?,
+                    max_tlp: parse_tlp_opt(self.v(2))?.ok_or("max TLP is required")?,
+                })
+            }
+            FormKind::EditToken { id } => Request::UpdateToken {
+                id: *id,
+                scopes: parse_scopes(self.v(0))?,
+                max_tlp: parse_tlp_opt(self.v(1))?.ok_or("max TLP is required")?,
+            },
         })
     }
 
@@ -491,6 +571,23 @@ mod tests {
         assert_eq!(e.scope, AllowlistScope::Published);
         assert_eq!(e.behaviors, vec![Behavior::SmtpSpam, Behavior::Scan]);
         f.fields[2].value = "nope".into();
+        assert!(f.to_request().is_err());
+    }
+
+    #[test]
+    fn token_form() {
+        let mut f = Form::create_token();
+        f.fields[0].value = "firewall".into();
+        f.fields[1].value = "Read, allowlist".into();
+        f.fields[2].value = "TLP:AMBER".into();
+        let Request::CreateToken(t) = f.to_request().unwrap() else {
+            panic!()
+        };
+        assert_eq!(t.scopes, vec![ApiScope::Read, ApiScope::Allowlist]);
+        assert_eq!(t.max_tlp, Tlp::Amber);
+        f.fields[1].value = "".into();
+        assert!(f.to_request().is_err());
+        f.fields[1].value = "admin".into();
         assert!(f.to_request().is_err());
     }
 }

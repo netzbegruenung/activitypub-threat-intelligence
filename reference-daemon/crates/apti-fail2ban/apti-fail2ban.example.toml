@@ -3,10 +3,11 @@
 [aptid]
 # aptid internal REST API ([api].bind in the aptid config).
 url = "http://127.0.0.1:8081"
-# Token with scope "push" (needed by `push`).
-push_token = "change-me-sensors-0123456789"
+# Token with scope "push" (needed by `push`). Create tokens in apti-tui
+# (Tokens tab); the secret is shown only once.
+push_token = "apti_change-me-sensors"
 # Token with scope "read" (needed by `pull`). Its max_tlp limits what is banned.
-read_token = "change-me-firewall-0123456789"
+read_token = "apti_change-me-firewall"
 timeout_secs = 20
 
 # ---------------------------------------------------------------- push

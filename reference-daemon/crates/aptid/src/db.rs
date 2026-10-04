@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use apti_core::expiry::Assessment;
 use apti_core::policy::{BehaviorOverride, OperatorPolicy, Threshold};
-use apti_core::protocol::{AllowlistEntry, AllowlistScope, FollowerInfo, ReviewItem};
+use apti_core::protocol::{
+    AllowlistEntry, AllowlistScope, ApiScope, ApiTokenInfo, FollowerInfo, ReviewItem,
+};
 use apti_core::{Behavior, EvidenceObject, ObservableType, Tlp};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -29,7 +31,8 @@ fn opt_ts(s: Option<String>) -> Option<DateTime<Utc>> {
     s.as_deref().map(parse_ts)
 }
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 CREATE TABLE remote_actors (
@@ -180,7 +183,19 @@ CREATE TABLE active (
     assessment TEXT NOT NULL,
     PRIMARY KEY (observable_type, observable_value, behavior)
 );
-"#];
+"#,
+    r#"
+CREATE TABLE api_tokens (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    hash TEXT NOT NULL UNIQUE,
+    scopes TEXT NOT NULL,
+    max_tlp TEXT NOT NULL,
+    created TEXT NOT NULL,
+    last_used TEXT
+);
+"#,
+];
 
 #[derive(Clone)]
 pub struct Db {
@@ -1238,6 +1253,133 @@ pub fn delete_allowlist(c: &Connection, id: i64) -> anyhow::Result<Option<Allowl
         .optional()?;
     c.execute("DELETE FROM allowlist WHERE id = ?1", [id])?;
     Ok(e)
+}
+
+// -------------------------------------------------------------- api tokens
+
+fn api_token_row(r: &Row) -> rusqlite::Result<ApiTokenInfo> {
+    Ok(ApiTokenInfo {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        scopes: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(),
+        // Unknown values fall back to the most restrictive choice.
+        max_tlp: r.get::<_, String>(3)?.parse().unwrap_or(Tlp::Clear),
+        created: parse_ts(&r.get::<_, String>(4)?),
+        last_used: opt_ts(r.get(5)?),
+    })
+}
+
+const API_TOKEN_COLS: &str = "id, name, scopes, max_tlp, created, last_used";
+
+/// Store a token. `hash` is the hex SHA-512 of the secret; the secret
+/// itself is never stored.
+pub fn insert_api_token(
+    c: &Connection,
+    name: &str,
+    hash: &str,
+    scopes: &[ApiScope],
+    max_tlp: Tlp,
+) -> anyhow::Result<ApiTokenInfo> {
+    let exists = c
+        .query_row("SELECT 1 FROM api_tokens WHERE name = ?1", [name], |_| {
+            Ok(())
+        })
+        .optional()?
+        .is_some();
+    if exists {
+        anyhow::bail!("a token named `{name}` already exists");
+    }
+    c.execute(
+        "INSERT INTO api_tokens (name, hash, scopes, max_tlp, created) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            name,
+            hash,
+            serde_json::to_string(scopes)?,
+            max_tlp.as_str(),
+            ts(Utc::now())
+        ],
+    )?;
+    get_api_token(c, c.last_insert_rowid())?.context("token vanished after insert")
+}
+
+pub fn list_api_tokens(c: &Connection) -> anyhow::Result<Vec<ApiTokenInfo>> {
+    let mut stmt = c.prepare(&format!(
+        "SELECT {API_TOKEN_COLS} FROM api_tokens ORDER BY name"
+    ))?;
+    let rows = stmt
+        .query_map([], api_token_row)?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_api_token(c: &Connection, id: i64) -> anyhow::Result<Option<ApiTokenInfo>> {
+    Ok(c.query_row(
+        &format!("SELECT {API_TOKEN_COLS} FROM api_tokens WHERE id = ?1"),
+        [id],
+        api_token_row,
+    )
+    .optional()?)
+}
+
+pub fn update_api_token(
+    c: &Connection,
+    id: i64,
+    scopes: &[ApiScope],
+    max_tlp: Tlp,
+) -> anyhow::Result<Option<ApiTokenInfo>> {
+    c.execute(
+        "UPDATE api_tokens SET scopes = ?2, max_tlp = ?3 WHERE id = ?1",
+        params![id, serde_json::to_string(scopes)?, max_tlp.as_str()],
+    )?;
+    get_api_token(c, id)
+}
+
+/// Replace the secret hash; the old secret stops working immediately.
+pub fn set_api_token_hash(
+    c: &Connection,
+    id: i64,
+    hash: &str,
+) -> anyhow::Result<Option<ApiTokenInfo>> {
+    c.execute(
+        "UPDATE api_tokens SET hash = ?2, last_used = NULL WHERE id = ?1",
+        params![id, hash],
+    )?;
+    get_api_token(c, id)
+}
+
+pub fn delete_api_token(c: &Connection, id: i64) -> anyhow::Result<Option<ApiTokenInfo>> {
+    let t = get_api_token(c, id)?;
+    c.execute("DELETE FROM api_tokens WHERE id = ?1", [id])?;
+    Ok(t)
+}
+
+/// Look up a token by the hash of the presented secret and record its use
+/// (at most once a minute, to limit writes).
+pub fn authenticate_api_token(
+    c: &Connection,
+    hash: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<ApiTokenInfo>> {
+    let Some(mut t) = c
+        .query_row(
+            &format!("SELECT {API_TOKEN_COLS} FROM api_tokens WHERE hash = ?1"),
+            [hash],
+            api_token_row,
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    if t.last_used
+        .is_none_or(|u| now - u >= chrono::TimeDelta::minutes(1))
+    {
+        c.execute(
+            "UPDATE api_tokens SET last_used = ?2 WHERE id = ?1",
+            params![t.id, ts(now)],
+        )?;
+        t.last_used = Some(now);
+    }
+    Ok(Some(t))
 }
 
 // ------------------------------------------------------------------ review

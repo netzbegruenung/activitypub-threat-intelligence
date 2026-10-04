@@ -3,6 +3,9 @@
 //! Framing: one JSON [`Request`] per line, answered by one JSON [`Reply`]
 //! per line.
 
+use std::fmt;
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +91,22 @@ pub enum Request {
 
     /// Trigger an immediate recompute of the active list.
     Recompute,
+
+    ListTokens,
+    /// Create a REST API token; answered with [`Reply::TokenCreated`].
+    CreateToken(NewApiToken),
+    UpdateToken {
+        id: i64,
+        scopes: Vec<ApiScope>,
+        max_tlp: Tlp,
+    },
+    /// Replace the secret of a token; answered with [`Reply::TokenCreated`].
+    RotateToken {
+        id: i64,
+    },
+    DeleteToken {
+        id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,6 +124,13 @@ pub enum Reply {
     Allowlist(Vec<AllowlistEntry>),
     Active(Vec<Assessment>),
     Lookup(LookupResult),
+    Tokens(Vec<ApiTokenInfo>),
+    /// The only time the daemon reveals a token secret; it stores just the
+    /// SHA-512 hash.
+    TokenCreated {
+        token: ApiTokenInfo,
+        secret: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +262,67 @@ pub struct NewAllowlistEntry {
     pub summary: Option<String>,
 }
 
+/// Permission of a REST API token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiScope {
+    /// Submit observations.
+    Push,
+    /// Read the active list and the allowlist.
+    Read,
+    /// Manage local allowlist entries.
+    Allowlist,
+    /// Additionally manage published (federated) allowlist entries.
+    Publish,
+}
+
+impl ApiScope {
+    pub const ALL: [ApiScope; 4] = [Self::Push, Self::Read, Self::Allowlist, Self::Publish];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::Read => "read",
+            Self::Allowlist => "allowlist",
+            Self::Publish => "publish",
+        }
+    }
+}
+
+impl fmt::Display for ApiScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ApiScope {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|x| x.as_str() == s)
+            .ok_or_else(|| format!("unknown scope `{s}` (push, read, allowlist, publish)"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiTokenInfo {
+    pub id: i64,
+    pub name: String,
+    pub scopes: Vec<ApiScope>,
+    /// Most restrictive TLP this client may receive.
+    pub max_tlp: Tlp,
+    pub created: DateTime<Utc>,
+    pub last_used: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewApiToken {
+    pub name: String,
+    pub scopes: Vec<ApiScope>,
+    pub max_tlp: Tlp,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceSummary {
     pub id: String,
@@ -278,5 +365,19 @@ mod tests {
         assert_eq!(s, r#"{"type":"error","data":"x"}"#);
         let s = serde_json::to_string(&Request::Status).unwrap();
         assert_eq!(s, r#"{"cmd":"status"}"#);
+        let r = Request::CreateToken(NewApiToken {
+            name: "fw".into(),
+            scopes: vec![ApiScope::Read],
+            max_tlp: Tlp::Amber,
+        });
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains(r#""scopes":["read"]"#));
+        assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), r);
+    }
+
+    #[test]
+    fn scope_parse() {
+        assert_eq!("allowlist".parse::<ApiScope>(), Ok(ApiScope::Allowlist));
+        assert!("admin".parse::<ApiScope>().is_err());
     }
 }

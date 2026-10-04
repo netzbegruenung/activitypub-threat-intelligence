@@ -31,7 +31,8 @@ The daemon opens three endpoints:
 - **Public listener** (`[public].bind`): the ActivityPub endpoints. Run it
   behind a TLS-terminating reverse proxy that passes the `Host` header through
   unchanged, because HTTP signatures cover it.
-- **Internal REST API** (`[api].bind`): bearer tokens from the config file.
+- **Internal REST API** (`[api].bind`): bearer tokens managed in `apti-tui`
+  (see [API tokens](#api-tokens)).
   Bind it to an internal address only.
 - **Control socket** (`[control].socket`): a unix socket for `apti-tui`,
   created with the configured mode. Each peer is checked with `SO_PEERCRED`:
@@ -44,7 +45,7 @@ The SQLite database and the actor key are created with mode 0600.
 
 See [`config.example.toml`](config.example.toml). The TOML file holds:
 
-- bootstrap settings: URLs, listeners, tokens, intervals;
+- bootstrap settings: URLs, listeners, intervals;
 - policy defaults: `k`, local weight, T/M/TLP per behaviour, bootstrap trust
   per operator, and a static allowlist of high-impact infrastructure.
 
@@ -57,6 +58,25 @@ defaults, your own sensors can activate an observable on their own. Set
 `local_weight` below `k` if you want to require confirmation from peers.
 
 ## REST API
+
+### API tokens
+
+Create tokens in the TUI's **Tokens** tab (`a`). The daemon generates a
+random 256-bit secret (`apti_…`), shows it **once** and stores only its
+SHA-512 hash in the database. Each token has:
+
+- a unique name (shown in logs);
+- one or more scopes: `push`, `read`, `allowlist`, `publish` (see below);
+- `max_tlp`, the most restrictive TLP the client may read from the active
+  list.
+
+Scope and TLP changes (`e`) take effect immediately. `n` replaces the secret
+(the old one stops working at once) and `d` deletes the token. The Tokens tab
+also shows when each token was last used.
+
+Tokens are no longer read from the config file: a config that still contains
+`[[api.tokens]]` is rejected at startup. Recreate those tokens in the TUI and
+give the new secrets to the clients.
 
 ### Push observations (scope `push`)
 
@@ -250,12 +270,12 @@ Switch tabs with `←`/`→` or the number keys. Global keys: `r` refresh,
 
 | Tab | Actions |
 |---|---|
-| Status | Counters, queues, last recompute |
+| Status | Counters, queues, last recompute; TLP addressing overview. `e` set the default TLP and the AMBER recipient list |
 | Following | `a` follow (`user@host` or URL), `d` unfollow, `s` full resync |
 | Followers | `a` approve, `x` reject or remove (needed for TLP:GREEN) |
 | Operators | `e` set trusted/weight (operator default or per behaviour), `t` toggle trust, `c` clear a policy, `m` override actor→operator mapping |
 | Behaviours | `e` set `k` (number or `off`), T, M and the publish TLP per behaviour |
-| TLP | `e` set the default TLP and the AMBER recipient list |
+| Tokens | REST API tokens: `a` create (secret shown once), `e` edit scopes and max TLP, `n` new secret, `d` delete |
 | Review | `d` dismiss, `s` suspend `(O, b)`, `w` allowlist `O`, `h` show resolved, `⏎` lookup |
 | Allowlist | `a` add (local, or published as a `strongly-disagree` Opinion), `d` remove (published entries send `Delete`) |
 | Active | `i` include inactive or suspended entries, `⏎` lookup |
@@ -299,6 +319,8 @@ cargo test --workspace
     remotely, `Delete` re-activating the entry, and `Undo`.
   - **REST allowlist:** scopes, validation, idempotent POST, suspension,
     and withdrawal of published entries.
+  - **API tokens:** creation, scope changes, rotation and deletion over the
+    control socket; only the SHA-512 hash is stored.
 - **`crates/apti-fail2ban`:**
   - **Unit tests:** fail2ban log parsing and jail mapping, the log tailer
     (rotation, truncation, resume), and the pull re-emit logic.

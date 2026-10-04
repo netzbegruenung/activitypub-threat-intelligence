@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::allowlist;
+use crate::api;
 use crate::client;
 use crate::db;
 use crate::engine;
@@ -265,7 +266,77 @@ pub async fn handle(state: &AppState, req: Request) -> anyhow::Result<Reply> {
             engine::recompute(state).await?;
             Reply::Done
         }
+        Request::ListTokens => Reply::Tokens(state.db.call(|c| db::list_api_tokens(c)).await?),
+        Request::CreateToken(t) => {
+            let name = t.name.trim().to_string();
+            check_token_name(&name)?;
+            let scopes = check_scopes(t.scopes)?;
+            let secret = api::generate_token();
+            let hash = api::hash_token(&secret);
+            let token = state
+                .db
+                .call(move |c| db::insert_api_token(c, &name, &hash, &scopes, t.max_tlp))
+                .await?;
+            tracing::info!(token = %token.name, "API token created");
+            Reply::TokenCreated { token, secret }
+        }
+        Request::UpdateToken {
+            id,
+            scopes,
+            max_tlp,
+        } => {
+            let scopes = check_scopes(scopes)?;
+            let token = state
+                .db
+                .call(move |c| db::update_api_token(c, id, &scopes, max_tlp))
+                .await?
+                .ok_or_else(|| anyhow!("no token {id}"))?;
+            tracing::info!(token = %token.name, "API token updated");
+            Reply::Done
+        }
+        Request::RotateToken { id } => {
+            let secret = api::generate_token();
+            let hash = api::hash_token(&secret);
+            let token = state
+                .db
+                .call(move |c| db::set_api_token_hash(c, id, &hash))
+                .await?
+                .ok_or_else(|| anyhow!("no token {id}"))?;
+            tracing::info!(token = %token.name, "API token rotated");
+            Reply::TokenCreated { token, secret }
+        }
+        Request::DeleteToken { id } => {
+            let token = state
+                .db
+                .call(move |c| db::delete_api_token(c, id))
+                .await?
+                .ok_or_else(|| anyhow!("no token {id}"))?;
+            tracing::info!(token = %token.name, "API token deleted");
+            Reply::Done
+        }
     })
+}
+
+/// Token names appear in logs; keep them short and printable.
+fn check_token_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+    {
+        bail!("token name must be 1-64 characters of [A-Za-z0-9_.-]");
+    }
+    Ok(())
+}
+
+fn check_scopes(mut scopes: Vec<ApiScope>) -> anyhow::Result<Vec<ApiScope>> {
+    scopes.sort();
+    scopes.dedup();
+    if scopes.is_empty() {
+        bail!("a token needs at least one scope");
+    }
+    Ok(scopes)
 }
 
 async fn status(state: &AppState) -> anyhow::Result<StatusInfo> {

@@ -67,32 +67,10 @@ pub struct Public {
 #[serde(deny_unknown_fields)]
 pub struct Api {
     pub bind: SocketAddr,
+    /// No longer supported: tokens are managed in apti-tui and stored hashed
+    /// in the database. Parsed only to reject old configs with a hint.
     #[serde(default)]
-    pub tokens: Vec<ApiToken>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Scope {
-    /// Submit observations.
-    Push,
-    /// Read the active list and the allowlist.
-    Read,
-    /// Manage local allowlist entries.
-    Allowlist,
-    /// Additionally manage published (federated) allowlist entries.
-    Publish,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApiToken {
-    pub name: String,
-    pub token: String,
-    pub scopes: Vec<Scope>,
-    /// Most restrictive TLP this client may receive.
-    #[serde(default = "default_max_tlp")]
-    pub max_tlp: Tlp,
+    tokens: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -267,9 +245,6 @@ fn default_name() -> String {
 fn default_max_body() -> usize {
     4 * 1024 * 1024
 }
-fn default_max_tlp() -> Tlp {
-    Tlp::Green
-}
 fn default_socket_mode() -> String {
     "0600".into()
 }
@@ -324,10 +299,11 @@ impl Config {
         }
         u32::from_str_radix(self.control.mode.trim_start_matches("0o"), 8)
             .context("control.mode must be octal, e.g. \"0660\"")?;
-        for t in &self.api.tokens {
-            if t.token.len() < 16 {
-                bail!("api token `{}` must be at least 16 characters", t.name);
-            }
+        if self.api.tokens.is_some() {
+            bail!(
+                "[[api.tokens]] is no longer supported: remove it and create the tokens \
+                 in apti-tui (Tokens tab); they are stored hashed in the database"
+            );
         }
         Ok(())
     }
@@ -364,7 +340,16 @@ mod tests {
         let text = include_str!("../../../config.example.toml");
         let cfg = Config::parse(text).unwrap();
         assert_eq!(cfg.instance.username, "feed");
-        assert!(!cfg.api.tokens.is_empty());
+    }
+
+    #[test]
+    fn config_tokens_rejected() {
+        let text = format!(
+            "{}\n[[api.tokens]]\nname = \"x\"\ntoken = \"0123456789abcdef\"\nscopes = [\"read\"]\n",
+            include_str!("../../../config.example.toml")
+        );
+        let err = Config::parse(&text).unwrap_err();
+        assert!(format!("{err:#}").contains("apti-tui"), "{err:#}");
     }
 
     #[test]
