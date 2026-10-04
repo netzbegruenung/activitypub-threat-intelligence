@@ -7,8 +7,7 @@
 use apti_core::normalize::{self, NormPolicy};
 use apti_core::protocol::{AllowlistEntry, AllowlistScope, NewAllowlistEntry};
 use apti_core::{EvidenceKind, EvidenceObject, OpinionValue, Tlp};
-use chrono::{TimeDelta, Utc};
-use serde_json::json;
+use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::db;
 use crate::publish;
@@ -47,7 +46,8 @@ pub async fn get(state: &AppState, id: i64) -> anyhow::Result<Option<AllowlistEn
 }
 
 /// Add an entry. If an unexpired entry with the same scope, observable and
-/// behaviours exists, it is returned instead (`created == false`).
+/// behaviours (and, if published, TLP) exists, it is returned instead
+/// (`created == false`); a later `valid_until` extends it.
 pub async fn add(
     state: &AppState,
     e: NewAllowlistEntry,
@@ -67,14 +67,33 @@ pub async fn add(
     };
     let (ty, value) = normalize::normalise(&e.value, None, &norm)
         .map_err(|err| AllowlistError::Invalid(format!("{}: {err}", e.value)))?;
+    // The TLP of a published entry decides its audience, so it is part of
+    // the entry's identity.
+    let tlp = if published {
+        Some(match e.tlp {
+            Some(Tlp::Red) => {
+                return Err(AllowlistError::Invalid(
+                    "TLP:RED cannot be published".into(),
+                ))
+            }
+            Some(t) => t,
+            None => publish::tlp_settings(state).await?.0,
+        })
+    } else {
+        None
+    };
     if let Some(existing) = list(state).await?.into_iter().find(|x| {
         x.scope == e.scope
             && x.observable_type == ty
             && x.observable_value == value
             && same_behaviors(&x.behaviors, &e.behaviors)
+            && x.tlp == tlp
             && x.valid_until.is_none_or(|u| u > now)
     }) {
-        return Ok((existing, false));
+        return match (existing.valid_until, e.valid_until) {
+            (Some(old), Some(new)) if new > old => Ok((extend(state, existing, new).await?, false)),
+            _ => Ok((existing, false)),
+        };
     }
     let mut entry = AllowlistEntry {
         id: 0,
@@ -85,19 +104,11 @@ pub async fn add(
         tlp: None,
         valid_until: e.valid_until,
         summary: e.summary.clone(),
+        source: e.source.clone(),
         object_id: None,
         created: now,
     };
-    if published {
-        let tlp = match e.tlp {
-            Some(Tlp::Red) => {
-                return Err(AllowlistError::Invalid(
-                    "TLP:RED cannot be published".into(),
-                ))
-            }
-            Some(t) => t,
-            None => publish::tlp_settings(state).await?.0,
-        };
+    if let Some(tlp) = tlp {
         let valid_until = e.valid_until.unwrap_or(now + TimeDelta::days(90));
         let opinion = EvidenceObject {
             kind: EvidenceKind::Opinion,
@@ -126,27 +137,59 @@ pub async fn add(
             opinion: Some(OpinionValue::StronglyDisagree),
         };
         let audience = publish::audience_for(state, tlp).await?;
-        let (o, a) = (opinion.clone(), audience.clone());
+        let o = opinion.clone();
+        // Federated with the next publish batch (Section 5.3).
         state
             .db
-            .call(move |c| db::upsert_evidence(c, &o, true, &a, Some(valid_until)))
+            .call(move |c| {
+                db::upsert_evidence(c, &o, true, &audience, Some(valid_until))?;
+                db::queue_opinion(c, &o.id, "Create")
+            })
             .await?;
         entry.tlp = Some(tlp);
         entry.valid_until = Some(valid_until);
-        entry.object_id = Some(opinion.id.clone());
-        publish::publish(
-            state,
-            "Create",
-            vec![serde_json::to_value(&opinion).map_err(anyhow::Error::from)?],
-            tlp,
-            audience,
-        )
-        .await?;
+        entry.object_id = Some(opinion.id);
     }
     let e2 = entry.clone();
     entry.id = state.db.call(move |c| db::insert_allowlist(c, &e2)).await?;
     state.recompute.notify_one();
     Ok((entry, true))
+}
+
+/// Move the expiry of an entry to `until`; a published entry's Opinion is
+/// updated and queued as `Update` (sent to the audience it was published to).
+async fn extend(
+    state: &AppState,
+    mut entry: AllowlistEntry,
+    until: DateTime<Utc>,
+) -> Result<AllowlistEntry, AllowlistError> {
+    if let Some(oid) = entry.object_id.clone() {
+        let stored = state
+            .db
+            .call(move |c| db::get_evidence(c, &oid))
+            .await?
+            .filter(|s| s.deleted.is_none());
+        if let Some(stored) = stored {
+            let mut o = stored.object;
+            o.valid_until = Some(until);
+            o.updated = Some(Utc::now().max(o.base() + TimeDelta::milliseconds(1)));
+            state
+                .db
+                .call(move |c| {
+                    db::upsert_evidence(c, &o, true, &stored.audience, Some(until))?;
+                    db::queue_opinion(c, &o.id, "Update")
+                })
+                .await?;
+        }
+    }
+    let id = entry.id;
+    state
+        .db
+        .call(move |c| db::set_allowlist_valid_until(c, id, until))
+        .await?;
+    entry.valid_until = Some(until);
+    state.recompute.notify_one();
+    Ok(entry)
 }
 
 /// Remove an entry; published entries are withdrawn with `Delete`.
@@ -159,24 +202,19 @@ pub async fn remove(state: &AppState, id: i64) -> Result<AllowlistEntry, Allowli
     if let Some(object_id) = entry.object_id.clone() {
         let actor = state.urls.actor.clone();
         let tombstone_days = state.cfg.publish.tombstone_days;
-        let oid = object_id.clone();
-        // The Delete goes to the audience the Opinion was published to.
-        let removed = state
+        // The Delete is sent with the next batch, to the audience the
+        // Opinion was published to.
+        state
             .db
             .call(move |c| {
-                let audience = db::get_evidence(c, &oid)?
-                    .map(|e| e.audience)
-                    .unwrap_or_default();
                 let now = Utc::now();
-                let removed =
-                    db::mark_deleted(c, &oid, &actor, now, now + TimeDelta::days(tombstone_days))?;
-                Ok(removed.then_some(audience))
+                let until = now + TimeDelta::days(tombstone_days);
+                if db::mark_deleted(c, &object_id, &actor, now, until)? {
+                    db::queue_opinion(c, &object_id, "Delete")?;
+                }
+                Ok(())
             })
             .await?;
-        if let Some(audience) = removed {
-            let tlp = entry.tlp.unwrap_or(Tlp::Green);
-            publish::publish(state, "Delete", vec![json!(object_id)], tlp, audience).await?;
-        }
     }
     state.recompute.notify_one();
     Ok(entry)

@@ -246,7 +246,11 @@ pub struct AllowlistEntry {
     pub behaviors: Vec<Behavior>,
     pub tlp: Option<Tlp>,
     pub valid_until: Option<DateTime<Utc>>,
+    /// Rationale; part of the published Opinion.
     pub summary: Option<String>,
+    /// Who manages the entry (e.g. a sync tool). Internal, never published.
+    #[serde(default)]
+    pub source: Option<String>,
     /// Id of the published Opinion.
     pub object_id: Option<String>,
     pub created: DateTime<Utc>,
@@ -259,7 +263,11 @@ pub struct NewAllowlistEntry {
     pub behaviors: Vec<Behavior>,
     pub tlp: Option<Tlp>,
     pub valid_until: Option<DateTime<Utc>>,
+    /// Rationale; part of the published Opinion.
     pub summary: Option<String>,
+    /// Who manages the entry. Internal, never published.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// Permission of a REST API token.

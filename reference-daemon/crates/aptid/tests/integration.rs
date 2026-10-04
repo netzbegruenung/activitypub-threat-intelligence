@@ -278,6 +278,7 @@ async fn local_pipeline() {
             tlp: None,
             valid_until: None,
             summary: Some("test".into()),
+            source: None,
         }),
     )
     .await;
@@ -472,10 +473,12 @@ async fn federation_between_two_daemons() {
             tlp: Some(Tlp::Green),
             valid_until: None,
             summary: Some("false positive".into()),
+            source: None,
         }),
     )
     .await;
     wait_for("allowlist suspension at B", || async {
+        publish::run_batch(&a.state).await.unwrap();
         ctl_ok(&b, Request::Recompute).await;
         active(&b, READ)
             .await
@@ -491,6 +494,7 @@ async fn federation_between_two_daemons() {
     };
     ctl_ok(&a, Request::RemoveAllowlist { id: entries[0].id }).await;
     wait_for("re-activation at B", || async {
+        publish::run_batch(&a.state).await.unwrap();
         ctl_ok(&b, Request::Recompute).await;
         active(&b, READ)
             .await
@@ -629,13 +633,146 @@ async fn rest_allowlist() {
         Method::POST,
         "/api/v1/allowlist",
         ADMIN,
-        Some(json!({"value": "45.13.8.1", "scope": "published", "tlp": "green", "behaviors": ["scan"]})),
+        Some(json!({"value": "45.13.8.1", "scope": "published", "tlp": "green", "behaviors": ["scan"],
+                    "summary": "our scanner", "source": "sync-tool:/etc/x"})),
     )
     .await;
     assert_eq!(s, 201, "{p}");
     let object_id = p["objectId"].as_str().unwrap().to_string();
     assert!(p["validUntil"].is_string());
+    assert_eq!(p["source"], "sync-tool:/etc/x");
     let pid = p["id"].as_i64().unwrap();
+    let last_activity = || async {
+        d.state
+            .db
+            .call(|c| aptid::db::recent_activities(c, 1))
+            .await
+            .unwrap()
+            .pop()
+            .map(|a| a.json)
+            .unwrap_or_default()
+    };
+    // The Create is sent with the next batch; the source is not published.
+    assert_ne!(
+        last_activity().await["object"]["id"].as_str(),
+        Some(object_id.as_str())
+    );
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 1);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Create");
+    assert_eq!(act["object"]["id"].as_str(), Some(object_id.as_str()));
+    assert_eq!(act["object"]["summary"], "our scanner");
+    assert!(!act.to_string().contains("sync-tool"), "{act}");
+
+    // A later validUntil extends the entry and sends an Update of the Opinion.
+    let later = "2099-01-01T00:00:00Z";
+    let (s, x) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ADMIN,
+        Some(
+            json!({"value": "45.13.8.1", "scope": "published", "tlp": "green",
+                    "behaviors": ["scan"], "validUntil": later}),
+        ),
+    )
+    .await;
+    assert_eq!(s, 200, "{x}");
+    assert_eq!(x["id"].as_i64(), Some(pid));
+    assert_eq!(x["objectId"].as_str(), Some(object_id.as_str()));
+    assert_eq!(x["validUntil"], "2099-01-01T00:00:00Z");
+    let oid = object_id.clone();
+    let ev = d
+        .state
+        .db
+        .call(move |c| aptid::db::get_evidence(c, &oid))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ev.object.valid_until.map(|t| t.to_rfc3339()),
+        Some("2099-01-01T00:00:00+00:00".into())
+    );
+    assert!(ev.object.updated.is_some());
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 1);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Update");
+    assert_eq!(act["object"]["id"].as_str(), Some(object_id.as_str()));
+    assert_eq!(act["object"]["validUntil"], later);
+    // An earlier validUntil changes nothing.
+    let (s, x) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ADMIN,
+        Some(
+            json!({"value": "45.13.8.1", "scope": "published", "tlp": "green",
+                    "behaviors": ["scan"], "validUntil": "2098-01-01T00:00:00Z"}),
+        ),
+    )
+    .await;
+    assert_eq!((s, x["validUntil"].as_str()), (200, Some(later)));
+
+    // Another TLP is another entry.
+    let (s, c) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ADMIN,
+        Some(json!({"value": "45.13.8.1", "scope": "published", "tlp": "clear", "behaviors": ["scan"]})),
+    )
+    .await;
+    assert_eq!(s, 201, "{c}");
+    assert_ne!(c["id"].as_i64(), Some(pid));
+    let (s, _) = api(
+        &d,
+        Method::DELETE,
+        &format!("/api/v1/allowlist/{}", c["id"]),
+        ADMIN,
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    // Created and withdrawn within one interval: only the Delete is sent.
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 1);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Delete");
+    assert_eq!(act["object"], c["objectId"]);
+
+    // Several entries in one interval share one activity.
+    let mut ids = vec![];
+    for v in ["45.13.9.1", "45.13.9.2", "45.13.9.3"] {
+        let (s, e) = api(
+            &d,
+            Method::POST,
+            "/api/v1/allowlist",
+            ADMIN,
+            Some(json!({"value": v, "scope": "published", "tlp": "green"})),
+        )
+        .await;
+        assert_eq!(s, 201, "{e}");
+        ids.push(e["id"].as_i64().unwrap());
+    }
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 3);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Create");
+    assert_eq!(act["object"].as_array().map(Vec::len), Some(3), "{act}");
+    for id in ids {
+        let (s, _) = api(
+            &d,
+            Method::DELETE,
+            &format!("/api/v1/allowlist/{id}"),
+            ADMIN,
+            None,
+        )
+        .await;
+        assert_eq!(s, 200);
+    }
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 3);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Delete");
+    assert_eq!(act["object"].as_array().map(Vec::len), Some(3), "{act}");
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 0);
     let (s, _) = api(
         &d,
         Method::DELETE,

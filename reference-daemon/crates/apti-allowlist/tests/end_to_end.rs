@@ -6,12 +6,14 @@ use apti_allowlist::client::AptidClient;
 use apti_allowlist::config::Config;
 use apti_allowlist::reconcile::Mode;
 use apti_allowlist::sync::{Report, Syncer};
-use apti_core::protocol::ApiScope;
+use apti_core::protocol::{AllowlistScope, ApiScope};
 use apti_core::Tlp;
-use aptid::{api, db, Daemon};
+use aptid::{api, db, publish, Daemon};
 use tokio::net::TcpListener;
 
 const ALLOW: &str = "allow-token-0123456789";
+const PUBLISH: &str = "publish-token-0123456789";
+const LOCAL: AllowlistScope = AllowlistScope::Local;
 
 async fn spawn_aptid(dir: &Path) -> Daemon {
     let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -53,6 +55,13 @@ recompute_interval_secs = 3600
                 &[ApiScope::Allowlist],
                 Tlp::Green,
             )?;
+            db::insert_api_token(
+                c,
+                "publish",
+                &api::hash_token(PUBLISH),
+                &[ApiScope::Allowlist, ApiScope::Publish],
+                Tlp::Green,
+            )?;
             Ok(())
         })
         .await
@@ -61,13 +70,18 @@ recompute_interval_secs = 3600
 }
 
 fn config(d: &Daemon, file: &Path, extra: &str) -> Config {
+    config_with(d, ALLOW, file, "", extra)
+}
+
+fn config_with(d: &Daemon, token: &str, file: &Path, file_extra: &str, extra: &str) -> Config {
     Config::parse(&format!(
         r#"
 [aptid]
 url = "http://{api}"
-token = "{ALLOW}"
+token = "{token}"
 [file]
 path = "{f}"
+{file_extra}
 [sync]
 poll_interval_secs = 1
 resync_interval_secs = 3600
@@ -87,7 +101,7 @@ fn syncer(cfg: &Config, mode: Mode) -> Syncer {
 async fn values(cfg: &Config) -> Vec<String> {
     let mut v: Vec<String> = AptidClient::new(cfg)
         .unwrap()
-        .list()
+        .list(LOCAL)
         .await
         .unwrap()
         .into_iter()
@@ -106,7 +120,10 @@ async fn source_of_truth() {
     let client = AptidClient::new(&cfg).unwrap();
 
     // An entry created elsewhere (TUI, curl) is never removed by default.
-    client.add("192.0.2.1", "added by hand").await.unwrap();
+    client
+        .add("192.0.2.1", "tui", Some("added by hand"), LOCAL, None, None)
+        .await
+        .unwrap();
 
     std::fs::write(
         &file,
@@ -120,10 +137,10 @@ async fn source_of_truth() {
         values(&cfg).await,
         vec!["192.0.2.1", "45.13.7.0/24", "45.13.7.9", "example.org"]
     );
-    let entries = client.list().await.unwrap();
+    let entries = client.list(LOCAL).await.unwrap();
     let marked = entries
         .iter()
-        .filter(|e| e.summary.as_deref() == Some(cfg.marker().as_str()))
+        .filter(|e| e.source.as_deref() == Some(cfg.source().as_str()) && e.summary.is_none())
         .count();
     assert_eq!(marked, 3);
 
@@ -147,7 +164,7 @@ async fn source_of_truth() {
 
     // An entry deleted elsewhere is restored.
     let id = client
-        .list()
+        .list(LOCAL)
         .await
         .unwrap()
         .into_iter()
@@ -220,6 +237,88 @@ async fn append_and_watch() {
     let mut s = syncer(&down, Mode::Append);
     assert!(s.poll().await.is_none());
     assert!(s.sync_once().await.is_err());
+
+    d.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn published() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn_aptid(&dir.path().join("aptid")).await;
+    let file = dir.path().join("allowlist.txt");
+    let green = "scope = \"published\"\ntlp = \"green\"\nsummary = \"our mail relays\"";
+    let cfg = config_with(&d, PUBLISH, &file, green, "");
+    let client = AptidClient::new(&cfg).unwrap();
+    let published = || async { client.list(AllowlistScope::Published).await.unwrap() };
+
+    // A private address cannot be published; the other values are.
+    std::fs::write(&file, "45.13.7.9\n45.13.7.10\n10.0.0.1\n").unwrap();
+    let mut s = syncer(&cfg, Mode::SourceOfTruth);
+    let r = s.sync_once().await.unwrap();
+    assert_eq!((r.added, r.failed), (2, 1), "{r}");
+    let entries = published().await;
+    assert_eq!(entries.len(), 2);
+    let now = chrono::Utc::now();
+    for e in &entries {
+        assert_eq!(e.tlp, Some(Tlp::Green));
+        assert_eq!(e.summary.as_deref(), Some("our mail relays"));
+        assert_eq!(e.source, Some(cfg.source()));
+        let until = e.valid_until.unwrap();
+        assert!(until > now + chrono::TimeDelta::days(89), "{until}");
+    }
+    assert!(values(&cfg).await.is_empty(), "no local entries");
+    // Both Opinions go out in one Create with the summary, without the source.
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 2);
+    let act = d
+        .state
+        .db
+        .call(|c| db::recent_activities(c, 1))
+        .await
+        .unwrap()
+        .remove(0)
+        .json;
+    assert_eq!(act["type"], "Create");
+    let objects = act["object"].as_array().unwrap();
+    assert_eq!(objects.len(), 2);
+    assert!(objects.iter().all(|o| o["summary"] == "our mail relays"));
+    assert!(!act.to_string().contains("apti-allowlist:"), "{act}");
+
+    // An entry that expires soon is extended in place.
+    let soon = now + chrono::TimeDelta::hours(1);
+    client
+        .add(
+            "45.13.7.11",
+            &cfg.source(),
+            None,
+            AllowlistScope::Published,
+            Some(Tlp::Green),
+            Some(soon),
+        )
+        .await
+        .unwrap();
+    std::fs::write(&file, "45.13.7.9\n45.13.7.10\n45.13.7.11\n").unwrap();
+    let id = published()
+        .await
+        .iter()
+        .find(|e| e.observable_value == "45.13.7.11")
+        .unwrap()
+        .id;
+    let r = s.sync_once().await.unwrap();
+    assert_eq!((r.added, r.renewed), (0, 1), "{r}");
+    let e = published().await.into_iter().find(|e| e.id == id).unwrap();
+    assert!(e.valid_until.unwrap() > now + chrono::TimeDelta::days(89));
+
+    // Changing the TLP replaces the entries.
+    let clear = "scope = \"published\"\ntlp = \"clear\"";
+    let cfg = config_with(&d, PUBLISH, &file, clear, "");
+    let r = syncer(&cfg, Mode::SourceOfTruth).sync_once().await.unwrap();
+    assert_eq!((r.added, r.removed), (3, 3), "{r}");
+    assert!(published().await.iter().all(|e| e.tlp == Some(Tlp::Clear)));
+
+    // Without the publish scope every add is rejected, not retried forever.
+    let cfg = config_with(&d, ALLOW, &file, green, "");
+    let r = syncer(&cfg, Mode::Append).sync_once().await.unwrap();
+    assert_eq!((r.added, r.failed), (0, 3), "{r}");
 
     d.shutdown();
 }

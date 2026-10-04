@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
-use apti_core::ObservableType;
+use apti_core::protocol::AllowlistScope;
+use apti_core::{ObservableType, Tlp};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
@@ -28,7 +29,7 @@ impl std::fmt::Display for ApiError {
     }
 }
 
-/// A local allowlist entry as returned by `GET /api/v1/allowlist`.
+/// An allowlist entry as returned by `GET /api/v1/allowlist`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
@@ -38,8 +39,11 @@ pub struct Entry {
     /// Empty = all behaviours.
     #[serde(default)]
     pub behaviors: Vec<String>,
+    pub tlp: Option<Tlp>,
     pub valid_until: Option<DateTime<Utc>>,
     pub summary: Option<String>,
+    /// Who manages the entry (internal).
+    pub source: Option<String>,
 }
 
 pub struct AptidClient {
@@ -51,6 +55,9 @@ pub struct AptidClient {
 fn classify(status: reqwest::StatusCode, body: String) -> ApiError {
     match status.as_u16() {
         400 | 413 | 422 => ApiError::Rejected(anyhow!("HTTP {status}: {body}")),
+        403 => ApiError::Rejected(anyhow!(
+            "HTTP {status}: {body} (the token needs the `allowlist` scope, and `publish` for published entries)"
+        )),
         _ => ApiError::Transient(anyhow!("HTTP {status}: {body}")),
     }
 }
@@ -67,11 +74,15 @@ impl AptidClient {
         })
     }
 
-    /// All local entries, including expired ones.
-    pub async fn list(&self) -> Result<Vec<Entry>, ApiError> {
+    /// All entries of `scope`, including expired ones.
+    pub async fn list(&self, scope: AllowlistScope) -> Result<Vec<Entry>, ApiError> {
+        let scope = match scope {
+            AllowlistScope::Local => "local",
+            AllowlistScope::Published => "published",
+        };
         let resp = self
             .http
-            .get(format!("{}/api/v1/allowlist?scope=local", self.base))
+            .get(format!("{}/api/v1/allowlist?scope={scope}", self.base))
             .bearer_auth(&self.token)
             .send()
             .await
@@ -86,14 +97,33 @@ impl AptidClient {
             .map_err(ApiError::Transient)
     }
 
-    /// Add a local entry for all behaviours. Returns whether it was created
-    /// (`false`: an identical entry already existed).
-    pub async fn add(&self, value: &str, summary: &str) -> Result<bool, ApiError> {
+    /// Add an entry for all behaviours. Returns whether it was created
+    /// (`false`: an identical entry already existed; aptid extends it if
+    /// `valid_until` is later).
+    pub async fn add(
+        &self,
+        value: &str,
+        source: &str,
+        summary: Option<&str>,
+        scope: AllowlistScope,
+        tlp: Option<Tlp>,
+        valid_until: Option<DateTime<Utc>>,
+    ) -> Result<bool, ApiError> {
+        let mut body = json!({"value": value, "scope": scope, "source": source});
+        if let Some(s) = summary {
+            body["summary"] = json!(s);
+        }
+        if let Some(t) = tlp {
+            body["tlp"] = json!(t);
+        }
+        if let Some(u) = valid_until {
+            body["validUntil"] = json!(u);
+        }
         let resp = self
             .http
             .post(format!("{}/api/v1/allowlist", self.base))
             .bearer_auth(&self.token)
-            .json(&json!({"value": value, "scope": "local", "summary": summary}))
+            .json(&body)
             .send()
             .await
             .map_err(|e| ApiError::Transient(e.into()))?;

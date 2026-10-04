@@ -489,6 +489,7 @@ impl Form {
                     tlp: parse_tlp_opt(self.v(3))?,
                     valid_until,
                     summary: (!self.v(5).is_empty()).then(|| self.v(5).to_string()),
+                    source: None,
                 })
             }
             FormKind::Lookup => {

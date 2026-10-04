@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
-use chrono::Utc;
+use apti_core::protocol::AllowlistScope;
+use chrono::{TimeDelta, Utc};
 
 use crate::client::{ApiError, AptidClient};
 use crate::config::{self, Config};
-use crate::reconcile::{self, Mode};
+use crate::reconcile::{self, Mode, Target};
 
 /// Outcome of one reconcile.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -17,6 +18,8 @@ pub struct Report {
     pub added: usize,
     /// Adds answered with an existing entry.
     pub existing: usize,
+    /// Published entries extended before they expire.
+    pub renewed: usize,
     pub removed: usize,
     /// Removals withheld by `max_removals` / `allow_empty`.
     pub removals_skipped: usize,
@@ -28,7 +31,7 @@ pub struct Report {
 
 impl Report {
     fn changed(&self) -> bool {
-        self.added + self.removed > 0
+        self.added + self.renewed + self.removed > 0
     }
 }
 
@@ -36,8 +39,8 @@ impl std::fmt::Display for Report {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} added, {} removed, {} invalid line(s), {} rejected, {} removal(s) skipped",
-            self.added, self.removed, self.invalid, self.failed, self.removals_skipped
+            "{} added, {} renewed, {} removed, {} invalid line(s), {} rejected, {} removal(s) skipped",
+            self.added, self.renewed, self.removed, self.invalid, self.failed, self.removals_skipped
         )
     }
 }
@@ -45,8 +48,11 @@ impl std::fmt::Display for Report {
 pub struct Syncer {
     cfg: config::Sync,
     path: PathBuf,
-    marker: String,
-    mode: Mode,
+    target: Target,
+    scope: AllowlistScope,
+    summary: Option<String>,
+    /// Validity of published entries.
+    valid_for: Option<TimeDelta>,
     client: AptidClient,
     /// File content of the last successful reconcile.
     applied: Option<Vec<u8>>,
@@ -63,8 +69,20 @@ impl Syncer {
         Self {
             cfg: cfg.sync.clone(),
             path: cfg.file.path.clone(),
-            marker: cfg.marker(),
-            mode,
+            target: Target {
+                mode,
+                source: cfg.source(),
+                prune_all: cfg.sync.prune_all,
+                tlp: cfg.file.published().then_some(cfg.file.tlp).flatten(),
+                renew_before: if cfg.file.published() {
+                    cfg.file.renew_before()
+                } else {
+                    TimeDelta::zero()
+                },
+            },
+            scope: cfg.file.scope,
+            summary: cfg.file.summary.clone(),
+            valid_for: cfg.file.published().then(|| cfg.file.valid_for()),
             client,
             applied: None,
             pending: None,
@@ -96,17 +114,11 @@ impl Syncer {
         }
         let current = self
             .client
-            .list()
+            .list(self.scope)
             .await
             .map_err(|e| anyhow!("listing allowlist: {e}"))?;
-        let mut plan = reconcile::plan(
-            &parsed.values,
-            &current,
-            self.mode,
-            &self.marker,
-            self.cfg.prune_all,
-            Utc::now(),
-        );
+        let now = Utc::now();
+        let mut plan = reconcile::plan(&parsed.values, &current, &self.target, now);
         let mut report = Report {
             invalid: parsed.invalid.len(),
             ..Default::default()
@@ -123,16 +135,39 @@ impl Syncer {
                 plan.remove.clear();
             }
         }
-        // Add before removing so that nothing is briefly un-allowlisted.
-        for v in &plan.add {
-            match self.client.add(v, &self.marker).await {
+        // Add and renew before removing so that nothing is briefly
+        // un-allowlisted (e.g. when the TLP changes).
+        let valid_until = self.valid_for.map(|d| now + d);
+        let adds = plan.add.iter().map(|v| (v, false));
+        for (v, renew) in adds.chain(plan.renew.iter().map(|v| (v, true))) {
+            let r = self
+                .client
+                .add(
+                    v,
+                    &self.target.source,
+                    self.summary.as_deref(),
+                    self.scope,
+                    self.target.tlp,
+                    valid_until,
+                )
+                .await;
+            match r {
                 Ok(true) => {
                     tracing::info!(value = %v, "allowlisted");
                     report.added += 1;
                 }
+                Ok(false) if renew => {
+                    tracing::info!(value = %v, until = ?valid_until, "renewed");
+                    report.renewed += 1;
+                }
                 Ok(false) => report.existing += 1,
                 Err(ApiError::Rejected(e)) => {
-                    tracing::warn!(value = %v, "aptid rejected: {e:#}");
+                    // Retried at the next resync; warn only on file changes.
+                    if fresh {
+                        tracing::warn!(value = %v, "aptid rejected: {e:#}");
+                    } else {
+                        tracing::debug!(value = %v, "aptid rejected: {e:#}");
+                    }
                     report.failed += 1;
                 }
                 Err(e @ ApiError::Transient(_)) => return Err(anyhow!("adding {v}: {e}")),
@@ -193,7 +228,7 @@ impl Syncer {
             Ok(r) => {
                 self.failures = 0;
                 self.retry_at = None;
-                if r.changed() {
+                if r.changed() || r.failed > 0 {
                     tracing::info!("reconciled: {r}");
                 } else {
                     tracing::debug!("reconciled: {r}");

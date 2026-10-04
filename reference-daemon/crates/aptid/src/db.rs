@@ -195,6 +195,18 @@ CREATE TABLE api_tokens (
     last_used TEXT
 );
 "#,
+    r#"
+ALTER TABLE allowlist ADD COLUMN source TEXT;
+
+-- Activities for own Opinions, sent with the next publish batch. At most one
+-- per object: Create absorbs later Updates, Delete absorbs everything.
+CREATE TABLE pending_opinions (
+    object_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    queued TEXT NOT NULL
+);
+"#,
 ];
 
 #[derive(Clone)]
@@ -1203,16 +1215,17 @@ fn allowlist_row(r: &Row) -> rusqlite::Result<AllowlistEntry> {
         summary: r.get(7)?,
         object_id: r.get(8)?,
         created: parse_ts(&r.get::<_, String>(9)?),
+        source: r.get(10)?,
     })
 }
 
 const ALLOWLIST_COLS: &str =
-    "id, scope, observable_type, observable_value, behaviors, tlp, valid_until, summary, object_id, created";
+    "id, scope, observable_type, observable_value, behaviors, tlp, valid_until, summary, object_id, created, source";
 
 pub fn insert_allowlist(c: &Connection, e: &AllowlistEntry) -> anyhow::Result<i64> {
     c.execute(
         "INSERT INTO allowlist (scope, observable_type, observable_value, behaviors, tlp, valid_until,
-             summary, object_id, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             summary, object_id, created, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             match e.scope {
                 AllowlistScope::Local => "local",
@@ -1225,10 +1238,68 @@ pub fn insert_allowlist(c: &Connection, e: &AllowlistEntry) -> anyhow::Result<i6
             e.valid_until.map(ts),
             e.summary,
             e.object_id,
-            ts(e.created)
+            ts(e.created),
+            e.source
         ],
     )?;
     Ok(c.last_insert_rowid())
+}
+
+/// Queue a `Create`, `Update` or `Delete` of an own Opinion for the next
+/// publish batch.
+pub fn queue_opinion(c: &Connection, object_id: &str, kind: &str) -> anyhow::Result<()> {
+    c.execute(
+        "INSERT INTO pending_opinions (object_id, kind, queued) VALUES (?1, ?2, ?3)
+         ON CONFLICT(object_id) DO UPDATE SET version = version + 1,
+             kind = CASE WHEN excluded.kind = 'Delete' THEN 'Delete' ELSE kind END",
+        params![object_id, kind, ts(Utc::now())],
+    )?;
+    Ok(())
+}
+
+pub struct PendingOpinion {
+    pub object_id: String,
+    pub kind: String,
+    pub version: i64,
+}
+
+pub fn pending_opinions(c: &Connection) -> anyhow::Result<Vec<PendingOpinion>> {
+    let mut stmt = c.prepare(
+        "SELECT object_id, kind, version FROM pending_opinions ORDER BY queued, object_id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(PendingOpinion {
+                object_id: r.get(0)?,
+                kind: r.get(1)?,
+                version: r.get(2)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// Remove sent entries, unless they were queued again meanwhile.
+pub fn clear_pending_opinions(c: &Connection, sent: &[(String, i64)]) -> anyhow::Result<()> {
+    for (id, version) in sent {
+        c.execute(
+            "DELETE FROM pending_opinions WHERE object_id = ?1 AND version = ?2",
+            params![id, version],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn set_allowlist_valid_until(
+    c: &Connection,
+    id: i64,
+    until: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    c.execute(
+        "UPDATE allowlist SET valid_until = ?2 WHERE id = ?1",
+        params![id, ts(until)],
+    )?;
+    Ok(())
 }
 
 pub fn list_allowlist(c: &Connection) -> anyhow::Result<Vec<AllowlistEntry>> {

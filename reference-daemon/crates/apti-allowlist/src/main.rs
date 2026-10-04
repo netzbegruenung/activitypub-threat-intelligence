@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{r}");
             return Ok(());
         }
-        tracing::info!(file = %cfg.file.path.display(), ?mode, marker = %cfg.marker(), "watching allowlist file");
+        tracing::info!(file = %cfg.file.path.display(), ?mode, scope = ?cfg.file.scope, tlp = ?cfg.file.tlp, source = %cfg.source(), "watching allowlist file");
         syncer.run().await
     };
     let mut term = signal(SignalKind::terminate())?;

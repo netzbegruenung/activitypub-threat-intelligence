@@ -160,14 +160,26 @@ POST fields:
 - `behaviors`;
 - `tlp` (published only);
 - `validUntil`;
-- `summary`.
+- `summary`: the rationale, published with the Opinion of a published entry;
+- `source`: who manages the entry (for example a sync tool). It is stored
+  and returned, but never published.
 
 Behaviour:
 - **Idempotent POST:** if an unexpired entry with the same scope, value and
-  behaviours exists, POST returns it with `200` instead of `201`.
+  behaviours (and, for published entries, the same TLP) exists, POST returns
+  it with `200` instead of `201`. If both have a `validUntil` and the new one
+  is later, the entry is extended; a published entry's Opinion is sent again
+  as an `Update` to the audience it was first published to.
+- **Batching:** the `Create`, `Update` and `Delete` activities of published
+  entries are sent with the next publish batch (`publish.batch_interval_secs`),
+  grouped by type and audience with up to 1000 objects per activity
+  (Sec. 5.3). Several changes to one entry within an interval become one
+  activity: a `Create` carries the latest version, and a `Delete` replaces
+  everything else. The Opinion is in `activeObjects` immediately.
 - **Normalisation:** local entries accept any prefix length. Published
   entries must pass the same checks as published evidence.
-- **Deleting a published entry** sends a `Delete` to followers.
+- **Deleting a published entry** sends a `Delete` to followers (with the
+  next batch).
 - **Effect:** changes trigger a recompute. Allowlisted values are also
   rejected by `POST /api/v1/observations`.
 
@@ -250,10 +262,12 @@ Files are rotated to `.1` when they exceed `max_size_bytes`.
 
 ## Allowlist file (`apti-allowlist`)
 
-`apti-allowlist` keeps the local allowlist in sync with a hand-edited text
-file through the REST API (needs an `allowlist` token). The file holds one IP
+`apti-allowlist` keeps the local or published allowlist in sync with a
+hand-edited text file through the REST API (needs an `allowlist` token). The file holds one IP
 address, CIDR prefix or domain per line; `#` starts a comment and blank lines
-are ignored. Entries apply to all behaviours and never expire.
+are ignored. Entries apply to all behaviours. Local entries never expire;
+published entries are valid for `valid_for_days` and renewed while the tool
+runs.
 
 | Flag | Effect |
 |---|---|
@@ -274,20 +288,38 @@ See [`crates/apti-allowlist/apti-allowlist.example.toml`](crates/apti-allowlist/
   half-written file is not used. Every `resync_interval_secs` the file is
   reconciled anyway, which restores entries removed in the TUI. Additions
   are sent before removals.
-- **Present values:** a value counts as present only if an unexpired local
-  entry for all behaviours exists. A TUI entry restricted to some behaviours
-  does not count, and the tool adds its own entry.
-- **Ownership:** entries the tool creates carry the summary
-  `apti-allowlist:<path>` (`file.summary`). Source-of-truth mode removes
-  only these, unless `prune_all = true`, which removes every local entry
-  that is not in the file. Use a distinct summary per file if you run
-  several instances.
+- **Present values:** a value counts as present only if an unexpired entry
+  of the configured scope exists that applies to all behaviours (and, for
+  published entries, has the configured TLP). A TUI entry restricted to some
+  behaviours does not count, and the tool adds its own entry.
+- **Ownership:** entries the tool creates carry the internal source
+  `apti-allowlist:<path>` (`file.source`), which is never published.
+  Source-of-truth mode removes only these, unless `prune_all = true`, which
+  removes every entry of the scope that is not in the file. Use a distinct
+  source per file if you run several instances. `file.summary` is an
+  optional rationale; published entries carry it as the Opinion's
+  `summary`.
 - **Guards:** a missing or unreadable file changes nothing. A file without
   values removes nothing unless `allow_empty = true`, and a reconcile that
   would remove more than `max_removals` entries (default 100) removes none.
   Invalid lines are logged and skipped.
 - **Domains** cover only themselves, not their subdomains (unlike
   `policy.allowlist` in the aptid config).
+- **Published entries:** with `file.scope = "published"` the entries are
+  federated as `strongly-disagree` Opinions with `file.tlp` (required; not
+  RED). The token needs `allowlist` and `publish`; removals send `Delete` to
+  followers. Activities go out with aptid's next publish batch, so a bulk
+  import or a TLP change becomes a few activities, not one per line. Values must pass the checks for published evidence (no private
+  addresses, prefixes of at least /24 or /48); aptid rejects the others.
+  Entries are valid for `valid_for_days` (default 90) and are extended with
+  an `Update` once they expire within `renew_before_days` (default a tenth).
+  An entry with another TLP does not count: changing `file.tlp` publishes
+  new entries, and in source-of-truth mode withdraws the old ones. An
+  instance manages one scope; run two instances for local and published
+  entries. Published entries suspend values in the own active list, but
+  only local entries make `POST /api/v1/observations` reject a value.
+- **Rejected values** are logged when the file changes and retried at the
+  next resync.
 - **Outages:** if aptid is unreachable, the reconcile is retried with
   backoff.
 
@@ -367,8 +399,11 @@ cargo test --workspace
     inbox `Create` and `Update`, verified operator mapping, the untrusted
     review queue, trust activation, a published allowlist that suspends
     remotely, `Delete` re-activating the entry, and `Undo`.
-  - **REST allowlist:** scopes, validation, idempotent POST, suspension,
-    and withdrawal of published entries.
+  - **REST allowlist:** scopes, validation, idempotent POST, extension of
+    published entries with `Update`, TLP as part of a published entry,
+    the unpublished `source`, batching of Opinion activities (grouping,
+    collapsing a `Create` and `Delete` within one interval),
+    suspension, and withdrawal of published entries.
   - **API tokens:** creation, scope changes, rotation and deletion over the
     control socket; only the SHA-512 hash is stored.
 - **`crates/apti-fail2ban`:**
@@ -381,10 +416,13 @@ cargo test --workspace
     `fail2ban-regex` (fail2ban 1.1.0).
 - **`crates/apti-allowlist`:**
   - **Unit tests:** config validation, file parsing and the reconcile plan
-    (restricted and expired entries, ownership, `prune_all`).
+    (restricted and expired entries, ownership, `prune_all`, TLP and
+    renewal of published entries).
   - **End-to-end tests** against an in-process aptid: import, edits,
     restoring removed entries, the removal guards, append mode, waiting
-    for a stable file, and an outage.
+    for a stable file, an outage, and published entries (TLP, summary
+    published but source not, one batched `Create`, rejected values,
+    renewal, TLP change, missing `publish` scope).
 
 ## Limitations
 
