@@ -497,7 +497,11 @@ TLP visibility on fetch:
 ## TUI
 
 Switch tabs with `←`/`→` or the number keys. Global keys: `r` refresh,
-`R` recompute now, `q` quit.
+`R` recompute now, `q` quit. On every table, `f` opens a filter with one
+field per column (case-insensitive substring, all fields must match) and `F`
+clears it. Filters are kept per tab. The scroll bar and the bottom border
+show the position of the selected row; with a filter active it reads
+`selected/matching (total)`.
 
 | Tab | Actions |
 |---|---|
@@ -509,8 +513,8 @@ Switch tabs with `←`/`→` or the number keys. Global keys: `r` refresh,
 | Tokens | REST API tokens: `a` create (secret shown once), `e` edit scopes and max TLP, `n` new secret, `d` delete |
 | Review | `d` dismiss, `s` suspend `(O, b)`, `w` allowlist `O`, `h` show resolved, `⏎` lookup |
 | Allowlist | `a` add (local, or published as a `strongly-disagree` Opinion), `d` remove (published entries send `Delete`) |
-| Active | `i` include inactive or suspended entries, `⏎` lookup |
-| Lookup | `/` look up a value: shows assessments with S/D weights, all evidence (including withdrawn) and covering allowlist entries |
+| Active | `d` dismiss: suspend the selected `(O, b)` with a local allowlist entry (undo by removing it in the Allowlist tab), `i` include inactive or suspended entries, `⏎` lookup |
+| Lookup | `/` look up a value: shows assessments with S/D weights, all evidence (including withdrawn) and covering allowlist entries. Filters apply to the evidence table |
 
 ## How the spec maps to the code
 
