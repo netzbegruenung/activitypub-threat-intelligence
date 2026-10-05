@@ -16,6 +16,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::allowlist;
 use crate::api;
+use crate::audit::Origin;
 use crate::client;
 use crate::db;
 use crate::engine;
@@ -78,6 +79,7 @@ pub async fn serve(state: Shared, listener: UnixListener, own_uid: u32) {
 }
 
 async fn connection(state: Shared, stream: UnixStream) -> anyhow::Result<()> {
+    let by = Origin::Control(stream.peer_cred().ok().map(|c| c.uid()));
     let (r, mut w) = stream.into_split();
     let mut lines = BufReader::new(r).lines();
     while let Some(line) = lines.next_line().await? {
@@ -85,7 +87,7 @@ async fn connection(state: Shared, stream: UnixStream) -> anyhow::Result<()> {
             continue;
         }
         let reply = match serde_json::from_str::<Request>(&line) {
-            Ok(req) => handle(&state, req)
+            Ok(req) => handle(&state, req, &by)
                 .await
                 .unwrap_or_else(|e| Reply::Error(format!("{e:#}"))),
             Err(e) => Reply::Error(format!("invalid request: {e}")),
@@ -97,7 +99,7 @@ async fn connection(state: Shared, stream: UnixStream) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn handle(state: &AppState, req: Request) -> anyhow::Result<Reply> {
+pub async fn handle(state: &AppState, req: Request, by: &Origin) -> anyhow::Result<Reply> {
     Ok(match req {
         Request::Status => Reply::Status(status(state).await?),
         Request::ListFollowing => Reply::Following(list_following(state).await?),
@@ -237,16 +239,16 @@ pub async fn handle(state: &AppState, req: Request) -> anyhow::Result<Reply> {
                 .await?,
         ),
         Request::ResolveReview { id, action } => {
-            resolve_review(state, id, action).await?;
+            resolve_review(state, id, action, by).await?;
             Reply::Done
         }
         Request::ListAllowlist => Reply::Allowlist(state.db.call(|c| db::list_allowlist(c)).await?),
         Request::AddAllowlist(entry) => {
-            allowlist::add(state, entry).await?;
+            allowlist::add(state, entry, by).await?;
             Reply::Done
         }
         Request::RemoveAllowlist { id } => {
-            allowlist::remove(state, id).await?;
+            allowlist::remove(state, id, by).await?;
             Reply::Done
         }
         Request::ListActive {
@@ -492,7 +494,12 @@ async fn list_behaviors(state: &AppState) -> anyhow::Result<Vec<BehaviorPolicyIn
         .collect())
 }
 
-async fn resolve_review(state: &AppState, id: i64, action: ReviewAction) -> anyhow::Result<()> {
+async fn resolve_review(
+    state: &AppState,
+    id: i64,
+    action: ReviewAction,
+    by: &Origin,
+) -> anyhow::Result<()> {
     let resolution = match action {
         ReviewAction::Dismiss => "dismissed",
         ReviewAction::Suspend => "suspended",
@@ -503,12 +510,13 @@ async fn resolve_review(state: &AppState, id: i64, action: ReviewAction) -> anyh
         .call(move |c| db::resolve_review(c, id, resolution))
         .await?
         .ok_or_else(|| anyhow!("no review item {id}"))?;
+    state.audit.review(by, &item);
     let behaviors = match action {
         ReviewAction::Dismiss => return Ok(()),
         ReviewAction::Suspend => item.behavior.into_iter().collect(),
         ReviewAction::Allowlist => vec![],
     };
-    let entry = AllowlistEntry {
+    let mut entry = AllowlistEntry {
         id: 0,
         scope: AllowlistScope::Local,
         observable_type: item.observable_type,
@@ -521,10 +529,9 @@ async fn resolve_review(state: &AppState, id: i64, action: ReviewAction) -> anyh
         object_id: None,
         created: Utc::now(),
     };
-    state
-        .db
-        .call(move |c| db::insert_allowlist(c, &entry))
-        .await?;
+    let e = entry.clone();
+    entry.id = state.db.call(move |c| db::insert_allowlist(c, &e)).await?;
+    state.audit.allowlist(by, &entry, "allowlist added");
     state.recompute.notify_one();
     Ok(())
 }

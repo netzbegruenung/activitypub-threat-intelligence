@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 
 use crate::allowlist::{self, AllowlistError};
+use crate::audit::Origin;
 use crate::db::{self, Observation};
 use crate::engine::{self, LocalAllowlist};
 use crate::publish;
@@ -136,9 +137,10 @@ async fn push(
     headers: HeaderMap,
     Json(body): Json<OneOrMany>,
 ) -> Response {
-    if let Err(r) = authorise(&state, &headers, ApiScope::Push).await {
-        return r;
-    }
+    let token = match authorise(&state, &headers, ApiScope::Push).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     let items = match body {
         OneOrMany::Many(v) => v,
         OneOrMany::One(o) => vec![o],
@@ -228,7 +230,7 @@ async fn push(
         });
     }
     let n = accepted.len();
-    if let Err(e) = state
+    let accepted = match state
         .db
         .call(move |c| {
             let tx = c.transaction()?;
@@ -236,11 +238,16 @@ async fn push(
                 db::add_observation(&tx, o)?;
             }
             tx.commit()?;
-            Ok(())
+            Ok(accepted)
         })
         .await
     {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"));
+        Ok(a) => a,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
+    };
+    let by = Origin::Api(token.name);
+    for o in &accepted {
+        state.audit.observation(&by, o);
     }
     Json(PushResult {
         accepted: n,
@@ -495,7 +502,7 @@ async fn allowlist_add(
         summary: body.summary,
         source: body.source,
     };
-    match allowlist::add(&state, entry).await {
+    match allowlist::add(&state, entry, &Origin::Api(token.name.clone())).await {
         Ok((e, created)) => {
             tracing::info!(token = %token.name, value = %e.observable_value, created, "allowlist add via API");
             let code = if created {
@@ -526,7 +533,7 @@ async fn allowlist_remove(
     if let Err(r) = check_publish(&token, existing.scope) {
         return r;
     }
-    match allowlist::remove(&state, id).await {
+    match allowlist::remove(&state, id, &Origin::Api(token.name.clone())).await {
         Ok(e) => {
             tracing::info!(token = %token.name, value = %e.observable_value, "allowlist remove via API");
             Json(AllowlistOut::from(e)).into_response()

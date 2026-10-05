@@ -8,6 +8,7 @@ use apti_core::{EvidenceKind, EvidenceObject, Tlp, AS_PUBLIC, MAX_BATCH};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{json, Value};
 
+use crate::audit::Origin;
 use crate::client;
 use crate::db::{self, Observation};
 use crate::engine;
@@ -253,10 +254,12 @@ async fn publish_sightings(state: &AppState) -> anyhow::Result<usize> {
         let (sighting, is_update) = sighting_from(state, &obs, existing, tlp, now);
         let listed_until = obs.last_seen + policy.ttl(obs.behavior, obs.observable_type);
         let (s, a) = (sighting.clone(), audience.clone());
+        let audit = state.audit;
         state
             .db
             .call(move |c| {
-                db::upsert_evidence(c, &s, true, &a, Some(listed_until))?;
+                let result = db::upsert_evidence(c, &s, true, &a, Some(listed_until))?;
+                audit.evidence(&Origin::Daemon, &s, result);
                 db::mark_observation_published(c, &obs, &s.id)
             })
             .await?;

@@ -28,6 +28,39 @@ cp config.example.toml /etc/aptid/config.toml   # then edit it
 
 Logging uses `RUST_LOG`, e.g. `RUST_LOG=aptid=debug`.
 
+### Audit log
+
+With `[audit] enabled = true` the daemon logs every change to an observable
+to stdout, next to the other log messages, so the systemd journal captures
+it. Audit lines have the target `audit` and are logged at INFO regardless
+of `RUST_LOG`:
+
+```sh
+journalctl -u aptid -g ' audit: '
+```
+
+```
+INFO audit: observation received by="api:fail2ban" obs_type="ipv4-addr" value="45.13.7.9" behavior="ssh-bruteforce" count=12 seen="…" tlp="green"
+INFO audit: evidence stored by="daemon" obs_type="ipv4-addr" value="45.13.7.9" behavior="ssh-bruteforce" evidence="Sighting" id="https://ti.example.net/objects/…" tlp="green"
+INFO audit: active changed by="daemon" obs_type="ipv4-addr" value="45.13.7.9" behavior="ssh-bruteforce" changes="added,activated" active=true flagged=false suspended=false allowlisted=false expiry="…" tlp="green" support=2.0 dispute=0.0
+INFO audit: allowlist added by="control:uid=1000" obs_type="ipv4-addr" value="45.13.7.9" behavior="all" id=3 scope="local" summary="our scanner"
+```
+
+| Event | When |
+|---|---|
+| `observation received` | A sensor pushed an observation (`POST /api/v1/observations`). |
+| `evidence stored`, `evidence updated` | A Sighting, ThreatIndicator or Opinion was stored or replaced by a newer copy: from a peer (inbox or pull sync) or an own Sighting from a publish batch. |
+| `evidence withdrawn` | A peer withdrew evidence with `Delete` or a Tombstone. |
+| `evidence purged` | Retention removed evidence that can no longer contribute (Section 11). |
+| `allowlist added`, `allowlist extended`, `allowlist removed` | An allowlist entry was changed in the TUI, over the REST API or by resolving a review item. Published entries name their Opinion (`object`). |
+| `review resolved` | A review item was dismissed, suspended or allowlisted. |
+| `active changed` | A recompute changed an entry of the active list. `changes` lists `added`, `activated`/`deactivated`, `suspended`/`unsuspended`, `flagged`/`unflagged`, `expiry`, `tlp` (while listed) or `removed`; the other fields show the new state. New entries that are neither listed, suspended nor flagged are left out. |
+
+`by` names who caused the change: `api:<token name>`, `control:uid=<uid>`,
+`peer:<actor id>` or `daemon`. Strings are quoted and escaped, so remote
+values cannot break or forge lines. Pushed observations are logged one per
+line, so busy sensors produce many lines.
+
 The daemon opens three endpoints:
 
 - **Public listener** (`[public].bind`): the ActivityPub endpoints. Run it
@@ -562,6 +595,12 @@ cargo test --workspace
     suspension, and withdrawal of published entries.
   - **API tokens:** creation, scope changes, rotation and deletion over the
     control socket; only the SHA-512 hash is stored.
+- **`crates/aptid/tests/audit.rs`:** the audit log: nothing is logged when
+  disabled; a push, the published Sighting, activation, an allowlist entry
+  from the control socket, suspension, removal over the REST API and
+  re-activation are logged with their origin; a newline in a summary is
+  escaped; a recompute without changes logs nothing. Unit tests in
+  `aptid/src/audit.rs` cover the active-list diff.
 - **`crates/apti-fail2ban`:**
   - **Unit tests:** fail2ban log parsing and jail mapping, the log tailer
     (rotation, truncation, resume), and the pull re-emit logic.

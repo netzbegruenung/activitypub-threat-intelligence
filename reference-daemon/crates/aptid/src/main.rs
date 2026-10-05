@@ -17,13 +17,15 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
     let args = Args::parse();
     let cfg = aptid::config::Config::load(&args.config)?;
+    let mut filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if cfg.audit.enabled {
+        // The audit log does not depend on RUST_LOG.
+        filter = filter.add_directive(format!("{}=info", aptid::audit::TARGET).parse()?);
+    }
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     if args.check {
         println!("configuration OK: {}", args.config.display());
         return Ok(());

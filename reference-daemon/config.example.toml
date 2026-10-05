@@ -100,6 +100,12 @@ retention_days = 30
 # Section 9: at least hourly; values above 3600 are rejected.
 recompute_interval_secs = 300
 
+[audit]
+# Log every change to an observable (observations, evidence, allowlist,
+# review, active list) to stdout with target `audit`, regardless of
+# RUST_LOG. Lines carry who caused the change (`by`).
+enabled = false
+
 # Per-behaviour overrides of k, T (ttl_secs), M (max_age_secs) and the TLP
 # used when publishing Sightings of this behaviour.
 [policy.behavior.ssh-bruteforce]

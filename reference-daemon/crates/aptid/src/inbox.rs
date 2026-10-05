@@ -6,6 +6,7 @@ use apti_core::{EvidenceKind, EvidenceObject, MAX_BATCH};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{json, Value};
 
+use crate::audit::Origin;
 use crate::client::{self, as_list, host_of, id_of};
 use crate::db::{self, Upsert};
 use crate::publish;
@@ -97,10 +98,12 @@ pub async fn ingest_objects(
     }
     let actor = actor.to_string();
     let quota = state.cfg.federation.max_evidence_per_publisher;
+    let audit = state.audit;
     let (stored, ignored, invalid, deleted) = state
         .db
         .call(move |c| {
             let (mut stored, mut ignored, mut invalid, mut deleted) = (0, 0, 0, 0);
+            let by = Origin::Peer(actor.clone());
             // Bound the storage and engine work one publisher can cause
             // (Section 10). Updates of known objects are always accepted.
             let mut live = db::count_evidence_by_publisher(c, &actor)?;
@@ -115,7 +118,9 @@ pub async fn ingest_objects(
                     invalid += 1;
                     continue;
                 }
-                match db::upsert_evidence(c, o, false, &[], None)? {
+                let result = db::upsert_evidence(c, o, false, &[], None)?;
+                audit.evidence(&by, o, result);
+                match result {
                     Upsert::Inserted => {
                         stored += 1;
                         live += 1;
@@ -137,6 +142,7 @@ pub async fn ingest_objects(
                 if host_of(id) == host_of(&actor)
                     && db::mark_deleted(c, id, &actor, *when, tombstone_until)?
                 {
+                    audit.withdrawn(c, &by, id);
                     deleted += 1;
                 }
             }
@@ -170,12 +176,15 @@ async fn delete_ids(state: &AppState, actor: &str, ids: Vec<String>) -> anyhow::
     let now = Utc::now();
     let until = now + TimeDelta::days(state.cfg.publish.tombstone_days);
     let actor = actor.to_string();
+    let audit = state.audit;
     state
         .db
         .call(move |c| {
+            let by = Origin::Peer(actor.clone());
             let mut n = 0;
             for id in &ids {
                 if db::mark_deleted(c, id, &actor, now, until)? {
+                    audit.withdrawn(c, &by, id);
                     n += 1;
                 }
             }
