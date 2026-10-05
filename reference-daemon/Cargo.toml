@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/apti-core", "crates/aptid", "crates/apti-tui", "crates/apti-fail2ban", "crates/apti-allowlist", "crates/apti-rspamd"]
 
 [workspace.package]
-version = "2026.10.7"
+version = "2026.10.8"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
