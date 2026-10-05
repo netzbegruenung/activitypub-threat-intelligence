@@ -262,6 +262,10 @@ pub async fn recompute(state: &AppState) -> anyhow::Result<usize> {
         .map(|o| o.id.clone())
         .collect();
     let stale_set: HashSet<&String> = stale.iter().collect();
+    let purged: Vec<&EvidenceObject> = evidence
+        .iter()
+        .filter(|o| stale_set.contains(&o.id))
+        .collect();
     let live: Vec<EvidenceObject> = evidence
         .iter()
         .filter(|o| !stale_set.contains(&o.id))
@@ -330,7 +334,8 @@ pub async fn recompute(state: &AppState) -> anyhow::Result<usize> {
 
     let n = list.len();
     let cutoff = now - retention;
-    state
+    let audit = state.audit;
+    let (before, list) = state
         .db
         .call(move |c| {
             if !stale.is_empty() {
@@ -340,9 +345,19 @@ pub async fn recompute(state: &AppState) -> anyhow::Result<usize> {
             for (kind, ty, value, b, detail) in &reviews {
                 db::insert_review(c, kind, *ty, value, *b, detail)?;
             }
-            db::replace_active(c, &list)
+            let before = if audit.enabled {
+                db::list_active(c, now, None, None, true)?
+            } else {
+                Vec::new()
+            };
+            db::replace_active(c, &list)?;
+            Ok((before, list))
         })
         .await?;
+    for o in purged {
+        audit.purged(o);
+    }
+    audit.active(&before, &list);
     *state
         .last_recompute
         .lock()

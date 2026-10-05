@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 
+use crate::audit::Audit;
 use crate::config::Config;
 use crate::db::Db;
 use crate::keys::Keys;
@@ -70,6 +71,7 @@ pub struct AppState {
     pub keys: Keys,
     pub http: reqwest::Client,
     pub urls: Urls,
+    pub audit: Audit,
     /// Wake the recompute task.
     pub recompute: Notify,
     /// Wake the sync task.
@@ -94,6 +96,9 @@ impl AppState {
         let http = http.build()?;
         Ok(Self {
             urls: Urls::new(&cfg),
+            audit: Audit {
+                enabled: cfg.audit.enabled,
+            },
             cfg,
             db,
             keys,

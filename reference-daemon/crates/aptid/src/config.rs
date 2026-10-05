@@ -28,6 +28,8 @@ pub struct Config {
     pub publish: Publish,
     #[serde(default)]
     pub policy: Policy,
+    #[serde(default)]
+    pub audit: AuditConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -152,6 +154,13 @@ impl Default for Publish {
             tombstone_days: 180,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuditConfig {
+    /// Log every change to an observable to stdout (target `audit`).
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]

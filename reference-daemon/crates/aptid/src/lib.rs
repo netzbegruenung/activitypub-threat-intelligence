@@ -4,11 +4,13 @@
 //! - public ActivityPub listener ([`ap`], [`inbox`], [`sync`], [`publish`]),
 //! - organisation-internal REST API ([`api`]),
 //! - control socket for the TUI ([`control`]),
-//! - effective-expiry engine ([`engine`]) on top of SQLite ([`db`]).
+//! - effective-expiry engine ([`engine`]) on top of SQLite ([`db`]),
+//! - optional audit log of changes to observables ([`audit`]).
 
 pub mod allowlist;
 pub mod ap;
 pub mod api;
+pub mod audit;
 pub mod client;
 pub mod config;
 pub mod control;

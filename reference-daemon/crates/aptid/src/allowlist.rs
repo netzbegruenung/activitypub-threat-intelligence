@@ -9,6 +9,7 @@ use apti_core::protocol::{AllowlistEntry, AllowlistScope, NewAllowlistEntry};
 use apti_core::{EvidenceKind, EvidenceObject, OpinionValue, Tlp};
 use chrono::{DateTime, TimeDelta, Utc};
 
+use crate::audit::Origin;
 use crate::db;
 use crate::publish;
 use crate::state::AppState;
@@ -51,6 +52,7 @@ pub async fn get(state: &AppState, id: i64) -> anyhow::Result<Option<AllowlistEn
 pub async fn add(
     state: &AppState,
     e: NewAllowlistEntry,
+    by: &Origin,
 ) -> Result<(AllowlistEntry, bool), AllowlistError> {
     let now = Utc::now();
     if e.valid_until.is_some_and(|u| u <= now) {
@@ -91,7 +93,9 @@ pub async fn add(
             && x.valid_until.is_none_or(|u| u > now)
     }) {
         return match (existing.valid_until, e.valid_until) {
-            (Some(old), Some(new)) if new > old => Ok((extend(state, existing, new).await?, false)),
+            (Some(old), Some(new)) if new > old => {
+                Ok((extend(state, existing, new, by).await?, false))
+            }
             _ => Ok((existing, false)),
         };
     }
@@ -152,6 +156,7 @@ pub async fn add(
     }
     let e2 = entry.clone();
     entry.id = state.db.call(move |c| db::insert_allowlist(c, &e2)).await?;
+    state.audit.allowlist(by, &entry, "allowlist added");
     state.recompute.notify_one();
     Ok((entry, true))
 }
@@ -162,6 +167,7 @@ async fn extend(
     state: &AppState,
     mut entry: AllowlistEntry,
     until: DateTime<Utc>,
+    by: &Origin,
 ) -> Result<AllowlistEntry, AllowlistError> {
     if let Some(oid) = entry.object_id.clone() {
         let stored = state
@@ -188,12 +194,17 @@ async fn extend(
         .call(move |c| db::set_allowlist_valid_until(c, id, until))
         .await?;
     entry.valid_until = Some(until);
+    state.audit.allowlist(by, &entry, "allowlist extended");
     state.recompute.notify_one();
     Ok(entry)
 }
 
 /// Remove an entry; published entries are withdrawn with `Delete`.
-pub async fn remove(state: &AppState, id: i64) -> Result<AllowlistEntry, AllowlistError> {
+pub async fn remove(
+    state: &AppState,
+    id: i64,
+    by: &Origin,
+) -> Result<AllowlistEntry, AllowlistError> {
     let entry = state
         .db
         .call(move |c| db::delete_allowlist(c, id))
@@ -216,6 +227,7 @@ pub async fn remove(state: &AppState, id: i64) -> Result<AllowlistEntry, Allowli
             })
             .await?;
     }
+    state.audit.allowlist(by, &entry, "allowlist removed");
     state.recompute.notify_one();
     Ok(entry)
 }
