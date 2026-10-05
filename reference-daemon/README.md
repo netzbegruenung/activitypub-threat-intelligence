@@ -13,6 +13,7 @@ It follows the deployment model of Appendix D. The workspace contains these crat
 | `apti-fail2ban` | connector | Pushes fail2ban bans to aptid and writes aptid's active list to files that fail2ban bans from. |
 | `apti-allowlist` | connector | Keeps aptid's local allowlist in sync with a text file (bulk import). |
 | `apti-rspamd` | connector | Reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to aptid, and serves aptid's active list to Rspamd as multimap files. |
+| `apti-dashboard` | tool | Renders a static HTML world map of findings per country (GeoIP), with a time slider and behaviour/origin filters. |
 
 ## Build and run
 
@@ -108,7 +109,7 @@ SHA-512 hash in the database. Each token has:
 - a unique name (shown in logs);
 - one or more scopes: `push`, `read`, `allowlist`, `publish` (see below);
 - `max_tlp`, the most restrictive TLP the client may read from the active
-  list.
+  list and the timeline.
 
 Scope and TLP changes (`e`) take effect immediately. `n` replaces the secret
 (the old one stops working at once) and `d` deletes the token. The Tokens tab
@@ -177,6 +178,43 @@ Each entry carries the most restrictive TLP of the evidence that supports it
 (indicators in effect, Sightings within T and `agree` Opinions).
 Entries above the token's `max_tlp` are left out, which keeps the TLP intact
 (Sec. 9).
+
+### Read the timeline (scope `read`)
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" \
+  'https://ti-internal:8081/api/v1/timeline?since=2026-09-01T00:00:00Z&behavior=scan'
+```
+
+```json
+{"generated": "...", "since": "2026-09-01T00:00:00Z", "until": "...", "entries": [
+  {"observableType": "ipv4-addr", "observableValue": "45.13.7.9", "behavior": "scan",
+   "kind": "Sighting", "origin": "local", "actor": "https://ti.example.org/actor",
+   "start": "2026-10-03T08:12:40.120Z", "end": "2026-10-04T13:38:59.324Z",
+   "count": 12, "tlp": "green"}],
+ "actors": {"https://ti.example.org/actor": {"handle": "feed@ti.example.org", "name": "Example Org"}}}
+```
+
+The observation periods of stored evidence, for statistics such as
+`apti-dashboard`. Unlike the active list, this is what was seen, not what is
+enforced: trust, quorum and expiry play no part.
+
+- **Entries:** one per Sighting or ThreatIndicator and behaviour.
+  `start`/`end` are `firstSeen`/`lastSeen` of a Sighting and
+  `validFrom`/`validUntil` of an indicator. Revoked indicators, withdrawn
+  objects and Opinions are left out.
+- **`origin`:** `local` for our own Sightings (observations appear once the
+  next publish batch has turned them into Sightings), `federated` for
+  evidence received from peers.
+- **`actor`** is the publishing actor (`attributedTo`). `actors` holds the
+  `handle` and display `name` of each, if known: our own from the config,
+  remote ones from the cached actor document (control characters removed).
+- **Window:** entries overlapping `[since, until]`. `until` defaults to now,
+  `since` to 30 days before `until`. Older evidence is only there until
+  retention removes it (`policy.retention_days`).
+- **Filters:** `type`, `behavior`.
+- **TLP and allowlist:** entries above the token's `max_tlp` and locally
+  allowlisted values are left out, as on the active list.
 
 ### Manage the allowlist
 
@@ -505,6 +543,88 @@ behaviour. Entries flagged for review are left out unless
 - **Outages:** if aptid is unreachable, the maps are rendered from the last
   fetched list, so entries still drop out at their effective expiry.
 
+## Threat map (`apti-dashboard`)
+
+Renders a world map of where findings come from as one static HTML page,
+with a time slider over a sliding window and filters for behaviour and
+origin (own sightings or federated). Each run reads
+`GET /api/v1/timeline` with a `read` token, looks up the country of every
+IP in a MaxMind DB and writes the page.
+
+```sh
+cp crates/apti-dashboard/apti-dashboard.example.toml /etc/apti-dashboard/config.toml
+apti-dashboard --config /etc/apti-dashboard/config.toml --check
+apti-dashboard --config /etc/apti-dashboard/config.toml               # render once
+apti-dashboard --config /etc/apti-dashboard/config.toml --interval 900  # every 15 min
+```
+
+Without `--interval` it renders once and exits, for cron or a systemd timer:
+
+```ini
+# /etc/systemd/system/apti-dashboard.service
+[Service]
+Type=oneshot
+User=apti-dashboard
+ExecStart=/usr/local/bin/apti-dashboard --config /etc/apti-dashboard/config.toml
+
+# /etc/systemd/system/apti-dashboard.timer
+[Timer]
+OnCalendar=*:0/15
+[Install]
+WantedBy=timers.target
+```
+
+Setup:
+
+1. Create a token with scope `read` in apti-tui (Tokens tab). Its
+   `max_tlp` decides what reaches the page; the page header shows the most
+   restrictive TLP of the data on it.
+2. Get a country database: [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite)
+   (CC BY 4.0, no account; credit DB-IP where you show the page) or MaxMind
+   GeoLite2-Country. Any MaxMind DB with GeoIP2 `country` records works;
+   it is read anew on every run.
+3. Serve `dashboard.output` with any web server. Do not make it public
+   unless the token's `max_tlp` is `clear` and `show_observables` is off:
+   observables are personal data (IP addresses) even at TLP:CLEAR.
+
+The page:
+
+- **Counting:** a finding is an observable with a behaviour; frame `t`
+  counts the distinct observables whose observation period overlaps
+  `[t - window_days, t]`, for each behaviour and origin.
+- **Findings table:** below the map, one row per observable with its
+  countries, behaviours, the actors that reported it with their Sighting
+  counts (or "indicator"), and when it was last seen. It follows the
+  behaviour and origin filters. With no country selected it lists all
+  findings of the last step before the slider position (e.g. the day
+  ending there with `step_hours = 24`). Click a country on the map or in
+  the top-countries table (or the "without a known country" note) to list
+  the observables behind its count, over the whole window like the map.
+  Click again, use "Clear selection" or press Escape to deselect. This embeds the IPs, prefixes,
+  domains and actor names in the page; with
+  `[dashboard] show_observables = false` the page holds per-country counts
+  only.
+- **Location:** a prefix is placed by its network address. Findings
+  without a known country are counted as unknown. Colours use a log scale
+  relative to the busiest country across all frames of the selected filter,
+  so they stay comparable while the slider moves.
+- **Self-contained:** the map (Natural Earth 1:110m, public domain,
+  generated by [`assets/gen-world.py`](crates/apti-dashboard/assets/gen-world.py)),
+  CSS, data and script are inline; nothing is loaded from elsewhere. Small
+  countries such as Singapore or Malta are not on the 1:110m map but are
+  listed in the table.
+- **CSP:** a `Content-Security-Policy` meta tag allows only the inline
+  script and style, by hash. You can also send it as a header; get the exact
+  value from the page's `<meta http-equiv="Content-Security-Policy">`.
+- **Without JavaScript:** the map and table show the latest window for all
+  behaviours and origins; the slider, filters and country details need
+  JavaScript.
+
+Domains are left out unless `[dns] resolve_domains = true`. Resolving them
+sends DNS queries for domains listed as malicious, whose name servers may be
+run by the attacker, from the host running the dashboard. A domain is
+counted once in each country its addresses are in.
+
 ## ActivityPub endpoints
 
 | Path | Description |
@@ -595,6 +715,10 @@ cargo test --workspace
     suspension, and withdrawal of published entries.
   - **API tokens:** creation, scope changes, rotation and deletion over the
     control socket; only the SHA-512 hash is stored.
+  - **REST timeline:** scopes, parameter validation, local and federated
+    entries (one per behaviour, sorted by start), publishing actors and
+    their display details, unpublished observations and revoked indicators
+    left out, TLP, window and filters, local allowlist.
 - **`crates/aptid/tests/audit.rs`:** the audit log: nothing is logged when
   disabled; a push, the published Sighting, activation, an allowlist entry
   from the control socket, suspension, removal over the REST API and
@@ -635,6 +759,23 @@ cargo test --workspace
     real SPF records: an SPF-authenticated envelope-from domain is reported
     with its own TLP, a forged one is skipped, and `gmail.com` is skipped
     via the zero-score `FREEMAIL_ENVFROM`.
+
+- **`crates/apti-dashboard`:**
+  - **Unit tests:** config validation, window boundaries, distinct
+    counting per behaviour, origin and country, colour classes and legend,
+    prefix and domain lookup, the vendored map, HTML and `</script>`
+    escaping, the CSP hashes, round trip of the embedded data, the country
+    details (observables, countries, actor labels, findings), and that no
+    IP or domain ends up in the page with `show_observables = false`.
+  - **End-to-end test** against an in-process aptid and a generated MaxMind
+    DB (IPv4 and IPv6): push → Sighting plus federated evidence → timeline
+    → page, including a token without `read` scope, TLP filtering, earlier
+    windows, skipped domains, the country details with local and remote
+    actors, and counts-only mode.
+  - **Manual check:** the page was rendered in headless Chromium with and
+    without JavaScript, and with filters and slider changed. For 48
+    combinations of country, behaviour, origin and frame, the number of
+    observables in the details table matched the country's count.
 
 ## Limitations
 

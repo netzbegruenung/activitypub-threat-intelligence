@@ -143,6 +143,7 @@ The [`reference-daemon`](reference-daemon/) Cargo workspace contains:
 | `apti-fail2ban` | Connector: reports fail2ban bans to `aptid` and writes the active list back to files that fail2ban bans from. |
 | `apti-allowlist` | Connector: keeps the local allowlist in sync with a hand-edited text file (append or source-of-truth mode). |
 | `apti-rspamd` | Connector: reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to `aptid` (with a separate TLP for each), and serves the active list to Rspamd as multimap files (IPs, URL and sender domains). |
+| `apti-dashboard` | Tool: renders a static HTML world map of where findings come from (GeoIP), with a time slider and filters for behaviour and own vs. federated evidence. |
 
 A typical deployment works like this:
 

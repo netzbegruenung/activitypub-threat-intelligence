@@ -1166,3 +1166,161 @@ async fn token_management() {
     assert_eq!(push(&d, &new, obs).await.0, 401);
     d.shutdown();
 }
+
+async fn timeline(d: &Daemon, token: &str, query: &str) -> (u16, Value) {
+    let r = reqwest::Client::new()
+        .get(format!("http://{}/api/v1/timeline{query}", d.api_addr))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    (status, r.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rest_timeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let peer = "https://peer.example.org/actor";
+    let now = chrono::Utc::now();
+    let days_ago = |n: i64| db::ts(now - chrono::TimeDelta::days(n));
+
+    let (s, _) = timeline(&d, "wrong-token-0000000000", "").await;
+    assert_eq!(s, 401);
+    let (s, _) = timeline(&d, PUSH, "").await;
+    assert_eq!(s, 403);
+    let (s, _) = timeline(&d, READ, "?behavior=bogus").await;
+    assert_eq!(s, 400);
+    let (s, _) = timeline(
+        &d,
+        READ,
+        &format!("?since={}&until={}", days_ago(1), days_ago(2)),
+    )
+    .await;
+    assert_eq!(s, 400);
+
+    // Local: only published Sightings appear.
+    push(
+        &d,
+        PUSH,
+        json!({"value": "45.13.7.9", "behavior": "ssh-bruteforce", "seenAt": days_ago(3), "count": 4}),
+    )
+    .await;
+    let (_, t) = timeline(&d, READ, "").await;
+    assert!(t["entries"].as_array().unwrap().is_empty(), "{t}");
+    publish::run_batch(&d.state).await.unwrap();
+
+    // Federated: an old Sighting, an indicator with two behaviours, a
+    // revoked indicator and an AMBER Sighting.
+    let objects = vec![
+        json!({
+            "type": "Sighting", "id": "https://peer.example.org/s/1",
+            "attributedTo": peer, "published": days_ago(5),
+            "observableType": "ipv4-addr", "observableValue": "45.13.7.1",
+            "observedBehavior": "scan", "firstSeen": days_ago(6), "lastSeen": days_ago(5),
+            "count": 2, "tlp": "clear"
+        }),
+        json!({
+            "type": "ThreatIndicator", "id": "https://peer.example.org/i/1",
+            "attributedTo": peer, "published": days_ago(1),
+            "observableType": "ipv6-addr", "observableValue": "2a01:4f8:1::/48",
+            "observedBehavior": ["scan", "exploit-attempt"],
+            "validFrom": days_ago(1), "validUntil": db::ts(now + chrono::TimeDelta::days(1)),
+            "tlp": "green"
+        }),
+        json!({
+            "type": "ThreatIndicator", "id": "https://peer.example.org/i/2",
+            "attributedTo": peer, "published": days_ago(1),
+            "observableType": "ipv4-addr", "observableValue": "45.13.7.2",
+            "observedBehavior": "scan", "revoked": true,
+            "validFrom": days_ago(1), "validUntil": db::ts(now + chrono::TimeDelta::days(1)),
+            "tlp": "clear"
+        }),
+        json!({
+            "type": "Sighting", "id": "https://peer.example.org/s/2",
+            "attributedTo": peer, "published": days_ago(1),
+            "observableType": "domain-name", "observableValue": "evil-domain.com",
+            "observedBehavior": "phishing", "firstSeen": days_ago(1), "lastSeen": days_ago(1),
+            "count": 1, "tlp": "amber"
+        }),
+    ];
+    let r = inbox::ingest_objects(&d.state, peer, objects, false)
+        .await
+        .unwrap();
+    assert_eq!(r.stored, 4, "{r:?}");
+
+    let (s, t) = timeline(&d, READ, "").await;
+    assert_eq!(s, 200, "{t}");
+    let entries = t["entries"].as_array().unwrap();
+    let summary: Vec<(&str, &str, &str)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["observableValue"].as_str().unwrap(),
+                e["behavior"].as_str().unwrap(),
+                e["origin"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // Sorted by start.
+    assert_eq!(
+        summary,
+        [
+            ("45.13.7.1", "scan", "federated"),
+            ("45.13.7.9", "ssh-bruteforce", "local"),
+            ("2a01:4f8:1::/48", "scan", "federated"),
+            ("2a01:4f8:1::/48", "exploit-attempt", "federated"),
+            ("evil-domain.com", "phishing", "federated"),
+        ],
+        "{t}"
+    );
+    let local = &entries[1];
+    assert_eq!(local["actor"], d.state.urls.actor);
+    assert_eq!(entries[0]["actor"], peer);
+    // Actor details: our own from the config; the peer was never fetched.
+    let own = &t["actors"][&d.state.urls.actor];
+    assert_eq!(own["name"], "Org a");
+    assert_eq!(own["handle"], "feed@127.0.0.1");
+    assert_eq!(t["actors"][peer], json!({}));
+    assert_eq!(t["actors"].as_object().unwrap().len(), 2);
+    assert_eq!(local["kind"], "Sighting");
+    assert_eq!(local["count"], 4);
+    assert_eq!(local["start"], local["end"]);
+    assert_eq!(entries[2]["kind"], "ThreatIndicator");
+    assert!(entries[2].get("count").is_none());
+
+    // TLP, window and filters.
+    let (_, t) = timeline(&d, READ_CLEAR, "").await;
+    let values: Vec<&str> = t["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["observableValue"].as_str().unwrap())
+        .collect();
+    assert_eq!(values, ["45.13.7.1"]);
+    let (_, t) = timeline(&d, READ, &format!("?since={}", days_ago(4))).await;
+    assert_eq!(t["entries"].as_array().unwrap().len(), 4, "{t}");
+    let (_, t) = timeline(&d, READ, &format!("?until={}", days_ago(4))).await;
+    assert_eq!(t["entries"].as_array().unwrap().len(), 1, "{t}");
+    let (_, t) = timeline(&d, READ, "?behavior=scan&type=ipv6-addr").await;
+    assert_eq!(t["entries"].as_array().unwrap().len(), 1, "{t}");
+
+    // Locally allowlisted observables are left out.
+    ctl_ok(
+        &d,
+        Request::AddAllowlist(NewAllowlistEntry {
+            scope: AllowlistScope::Local,
+            value: "2a01:4f8::/32".into(),
+            behaviors: vec![],
+            tlp: None,
+            valid_until: None,
+            summary: None,
+            source: None,
+        }),
+    )
+    .await;
+    let (_, t) = timeline(&d, READ, "").await;
+    assert_eq!(t["entries"].as_array().unwrap().len(), 3, "{t}");
+    d.shutdown();
+}

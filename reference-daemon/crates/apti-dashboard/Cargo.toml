@@ -1,0 +1,28 @@
+[package]
+name = "apti-dashboard"
+description = "Static HTML threat map for the AP-TI reference daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apti-core.workspace = true
+anyhow.workspace = true
+base64 = "0.22"
+chrono.workspace = true
+clap.workspace = true
+ipnet = "2"
+maxminddb = "0.32"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "sync"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+aptid = { path = "../aptid" }
+tempfile = "3"
