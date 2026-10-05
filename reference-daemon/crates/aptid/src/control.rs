@@ -120,6 +120,8 @@ pub async fn handle(state: &AppState, req: Request, by: &Origin) -> anyhow::Resu
             Reply::Done
         }
         Request::Resync { actor } => {
+            // Also refresh the cached actor document, e.g. a changed contact.
+            client::fetch_actor(state, &actor, true).await?;
             state
                 .db
                 .call(move |c| db::reset_full_sync(c, &actor))

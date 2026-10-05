@@ -686,7 +686,10 @@ impl App {
                 self.confirm(format!("Unfollow {actor}?"), Request::Unfollow { actor })
             }
             ('s', Some(actor)) => {
-                self.act(Request::Resync { actor }, "full resync scheduled");
+                self.act(
+                    Request::Resync { actor },
+                    "actor refreshed, full resync scheduled",
+                );
             }
             ('i', _) => match &row {
                 SourceRow::Actor {
@@ -884,7 +887,7 @@ fn dismiss_request(a: &Assessment) -> Request {
 fn summary_or_hint(summary: &Option<String>) -> String {
     summary
         .clone()
-        .unwrap_or_else(|| "(none; refreshed with the actor document)".into())
+        .unwrap_or_else(|| "(none; refreshed daily or with s resync)".into())
 }
 
 fn following_details(f: &FollowingInfo, op: Option<&OperatorInfo>) -> Modal {
