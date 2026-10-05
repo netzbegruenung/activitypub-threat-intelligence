@@ -649,7 +649,9 @@ impl App {
                 KeyCode::Enter => match form.to_request() {
                     Ok(req) => {
                         let is_lookup = matches!(form.kind, FormKind::Lookup);
-                        if is_lookup {
+                        if let Some(text) = tlp_change(&form.kind, &req) {
+                            self.confirm(text, req);
+                        } else if is_lookup {
                             if let Request::Lookup { value } = req {
                                 self.lookup(value);
                             }
@@ -670,6 +672,34 @@ impl App {
             },
         }
     }
+}
+
+/// Confirmation text if a behaviour policy form changes the publish TLP.
+fn tlp_change(kind: &FormKind, req: &Request) -> Option<String> {
+    let (
+        FormKind::Behavior { tlp: old, .. },
+        Request::SetBehaviorPolicy {
+            behavior,
+            default_tlp: new,
+            ..
+        },
+    ) = (kind, req)
+    else {
+        return None;
+    };
+    if old == new {
+        return None;
+    }
+    let name = |t: &Option<Tlp>| {
+        t.map_or("(default)".to_string(), |t| {
+            format!("TLP:{}", t.as_str().to_uppercase())
+        })
+    };
+    Some(format!(
+        "Change publish TLP for {behavior} from {} to {}? This changes who receives evidence published for this behaviour.",
+        name(old),
+        name(new)
+    ))
 }
 
 /// Suspend an active (O, b) pair with a local allowlist entry.
@@ -703,13 +733,11 @@ const OPERATORS_HEADER: [&str; 5] = [
     "Per behaviour",
     "Actors",
 ];
-const BEHAVIORS_HEADER: [&str; 7] = [
+const BEHAVIORS_HEADER: [&str; 5] = [
     "Behaviour",
-    "k",
-    "T (IP)",
-    "M (IP)",
-    "T (domain)",
-    "M (domain)",
+    "Threshold (k)",
+    "Sighting TTL",
+    "Max evidence age",
     "Publish TLP",
 ];
 const TOKENS_HEADER: [&str; 5] = ["Name", "Scopes", "Max TLP", "Created", "Last used"];
@@ -878,7 +906,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         Tab::Operators => {
             "e edit trust/weight  t toggle trusted  c clear behaviour policy  m map actor→operator"
         }
-        Tab::Behaviors => "e edit k / T / M / TLP",
+        Tab::Behaviors => "e edit threshold / TTL / max age / TLP",
         Tab::Tokens => "a create  e edit scopes/TLP  n new secret  d delete",
         Tab::Review => "d dismiss  s suspend (b)  w allowlist (O)  h show resolved  ⏎ lookup",
         Tab::Allowlist => "a add  d remove",
@@ -1117,31 +1145,43 @@ fn behavior_cells(b: &BehaviorPolicyInfo) -> Vec<Span<'static>> {
     vec![
         Span::from(b.behavior.as_str()),
         mark(b.overrides.k.is_some(), b.k.to_string()),
-        mark(b.overrides.ttl_secs.is_some(), fmt_secs(b.ttl_ip_secs)),
         mark(
-            b.overrides.max_age_secs.is_some(),
-            fmt_secs(b.max_age_ip_secs),
+            b.overrides.ttl_secs.is_some(),
+            ip_domain(b.ttl_ip_secs, b.ttl_domain_secs),
         ),
-        mark(b.overrides.ttl_secs.is_some(), fmt_secs(b.ttl_domain_secs)),
         mark(
             b.overrides.max_age_secs.is_some(),
-            fmt_secs(b.max_age_domain_secs),
+            ip_domain(b.max_age_ip_secs, b.max_age_domain_secs),
         ),
         tlp_span(b.effective_tlp),
     ]
 }
 
+/// One duration if IP and domain observables agree, else `IP / domain`
+/// (Table 1 defaults for C2, and the 90 d cap on M for IPs).
+fn ip_domain(ip: i64, domain: i64) -> String {
+    if ip == domain {
+        fmt_secs(ip)
+    } else {
+        format!("{} / {}", fmt_secs(ip), fmt_secs(domain))
+    }
+}
+
 fn draw_behaviors(f: &mut Frame, app: &mut App, area: Rect) {
     let widths = vec![
         Constraint::Length(22),
-        Constraint::Length(6),
-        Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Length(11),
-        Constraint::Length(11),
+        Constraint::Length(14),
+        Constraint::Length(14),
+        Constraint::Length(18),
         Constraint::Fill(1),
     ];
-    draw_table(f, app, area, widths, " Behaviour policy (* = override) ");
+    draw_table(
+        f,
+        app,
+        area,
+        widths,
+        " Behaviour policy (* = override, a / b = IP / domain) ",
+    );
 }
 
 fn draw_tlp(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1572,6 +1612,29 @@ mod tests {
         assert!(s.contains(" 2/3 (5) "), "{s}");
         assert!(s.contains('▲') && s.contains('▼'), "{s}");
         assert!(!s.contains("b.test"));
+    }
+
+    #[test]
+    fn merges_ip_and_domain_durations() {
+        assert_eq!(ip_domain(86_400, 86_400), "1d");
+        assert_eq!(ip_domain(7 * 86_400, 30 * 86_400), "7d / 30d");
+    }
+
+    #[test]
+    fn confirms_only_tlp_changes() {
+        let kind = FormKind::Behavior {
+            behavior: apti_core::Behavior::Scan,
+            tlp: None,
+        };
+        let req = |default_tlp| Request::SetBehaviorPolicy {
+            behavior: apti_core::Behavior::Scan,
+            overrides: Default::default(),
+            default_tlp,
+        };
+        assert_eq!(tlp_change(&kind, &req(None)), None);
+        let text = tlp_change(&kind, &req(Some(Tlp::Amber))).unwrap();
+        assert!(text.contains("from (default) to TLP:AMBER"), "{text}");
+        assert_eq!(tlp_change(&FormKind::Tlp, &req(Some(Tlp::Amber))), None);
     }
 
     #[test]

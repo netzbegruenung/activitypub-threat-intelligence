@@ -27,6 +27,8 @@ pub enum FormKind {
     MapActor,
     Behavior {
         behavior: Behavior,
+        /// Publish TLP override when the form was opened.
+        tlp: Option<Tlp>,
     },
     Tlp,
     Allowlist,
@@ -259,20 +261,21 @@ impl Form {
             format!(" Behaviour policy: {} ", b.behavior),
             FormKind::Behavior {
                 behavior: b.behavior,
+                tlp: b.default_tlp,
             },
             vec![
                 field(
-                    "k",
+                    "Threshold (k)",
                     o.k.map(|k| k.to_string()).unwrap_or_default(),
                     "quorum weight, `off`, or empty for default",
                 ),
                 field(
-                    "T",
+                    "Sighting TTL",
                     o.ttl_secs.map(fmt_secs).unwrap_or_default(),
                     "Sighting TTL, e.g. 1d; empty = Table 1 default",
                 ),
                 field(
-                    "M",
+                    "Max evidence age",
                     o.max_age_secs.map(fmt_secs).unwrap_or_default(),
                     "max evidence age, e.g. 14d; empty = default (IP ≤ 90d)",
                 ),
@@ -462,7 +465,7 @@ impl Form {
                     operator: (!self.v(1).is_empty()).then(|| self.v(1).to_string()),
                 }
             }
-            FormKind::Behavior { behavior } => {
+            FormKind::Behavior { behavior, .. } => {
                 let k = match self.v(0) {
                     "" => None,
                     k => Some(k.parse::<Threshold>()?),
@@ -668,6 +671,7 @@ mod tests {
             " t ",
             FormKind::Behavior {
                 behavior: Behavior::Scan,
+                tlp: None,
             },
             vec![
                 field("k", "off", ""),
