@@ -161,6 +161,12 @@ pub struct FollowingInfo {
     pub last_full_sync: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
     pub evidence: u64,
+    /// The actor's `name`, from its cached actor document.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The actor's `summary`; aptid puts its removal-request contact here.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,6 +175,12 @@ pub struct FollowerInfo {
     /// `pending` or `accepted`.
     pub state: String,
     pub since: DateTime<Utc>,
+    /// See [`FollowingInfo::name`].
+    #[serde(default)]
+    pub name: Option<String>,
+    /// See [`FollowingInfo::summary`].
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

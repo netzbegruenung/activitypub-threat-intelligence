@@ -236,8 +236,47 @@ fn parse_actor(id: &str, doc: &Value) -> anyhow::Result<RemoteActor> {
         public_key_pem: key["publicKeyPem"].as_str().map(String::from),
         operator_claim: clean(id_of(&doc["operator"])),
         preferred_username: clean(doc["preferredUsername"].as_str()),
+        name: doc["name"].as_str().and_then(display_text),
+        summary: doc["summary"].as_str().and_then(display_text),
         fetched_at: Utc::now(),
     })
+}
+
+/// Longest `name`/`summary` kept for display, in characters.
+const MAX_DISPLAY_TEXT: usize = 1000;
+
+/// Reduce free text from an actor document (often HTML) to a single line of
+/// plain text that is safe to show in the TUI.
+fn display_text(s: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                // Block-level tags like <p> and <br> separate words.
+                out.push(' ');
+            }
+            '>' if in_tag => in_tag = false,
+            _ if in_tag => {}
+            c if c.is_control() || c.is_whitespace() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    let out = out
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    let out: String = out
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_DISPLAY_TEXT)
+        .collect();
+    (!out.is_empty()).then_some(out)
 }
 
 /// Fetch (or return the cached copy of) a remote actor, and resolve its
@@ -378,6 +417,40 @@ mod tests {
         assert_eq!(a.delivery_inbox(), "https://ti.example.net/inbox");
         assert_eq!(a.operator_claim.as_deref(), Some("https://example.net/org"));
         assert!(parse_actor("https://other.example/actor", &doc).is_err());
+    }
+
+    #[test]
+    fn keeps_name_and_summary_for_display() {
+        let id = "https://ti.example.net/actor";
+        let doc = serde_json::json!({
+            "id": id, "type": "Service", "inbox": format!("{id}/inbox"),
+            "name": "Example TI",
+            "summary": "<p>Feed by Example.</p><p>Removal requests: abuse@example.net\u{1b}[2J</p>"
+        });
+        let a = parse_actor(id, &doc).unwrap();
+        assert_eq!(a.name.as_deref(), Some("Example TI"));
+        assert_eq!(
+            a.summary.as_deref(),
+            Some("Feed by Example. Removal requests: abuse@example.net [2J")
+        );
+    }
+
+    #[test]
+    fn display_text_is_plain_and_bounded() {
+        assert_eq!(
+            display_text("a &amp;lt; b &lt;c&gt;").as_deref(),
+            Some("a &lt; b <c>")
+        );
+        assert_eq!(
+            display_text("line1\nline2\t x").as_deref(),
+            Some("line1 line2 x")
+        );
+        assert_eq!(display_text("<br/>  "), None);
+        let long = "x".repeat(MAX_DISPLAY_TEXT + 10);
+        assert_eq!(
+            display_text(&long).unwrap().chars().count(),
+            MAX_DISPLAY_TEXT
+        );
     }
 
     #[test]
