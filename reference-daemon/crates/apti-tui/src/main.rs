@@ -72,6 +72,13 @@ enum Modal {
         name: String,
         secret: String,
     },
+    /// Read-only details of an actor. Action keys of the tab apply to the
+    /// selected row and close the popup.
+    Details {
+        title: String,
+        rows: Vec<(&'static str, String)>,
+        keys: &'static str,
+    },
 }
 
 #[derive(Default)]
@@ -549,6 +556,11 @@ impl App {
         match (self.current(), c) {
             (Tab::Following, 'a') => self.modal = Some(Modal::Form(Form::follow())),
             (Tab::Following, _) => self.following_action(i, c),
+            (Tab::Followers, 'i' | '\n') => {
+                if let Some(f) = self.data.followers.get(i) {
+                    self.modal = Some(follower_details(f));
+                }
+            }
             (Tab::Followers, 'a') => {
                 if let Some(f) = self.data.followers.get(i) {
                     let actor = f.actor.clone();
@@ -676,6 +688,17 @@ impl App {
             ('s', Some(actor)) => {
                 self.act(Request::Resync { actor }, "full resync scheduled");
             }
+            ('i', _) => match &row {
+                SourceRow::Actor {
+                    follow: Some(f), ..
+                } => {
+                    if let Some(f) = self.data.following.get(*f) {
+                        self.modal = Some(following_details(f, self.row_operator(&row)));
+                    }
+                }
+                SourceRow::Actor { .. } => self.info("actor not followed; no details known"),
+                SourceRow::Operator(_) => self.info("select an actor row for details"),
+            },
             ('m', _) => {
                 let actor = match &row {
                     SourceRow::Actor { actor, .. } => actor.clone(),
@@ -739,6 +762,11 @@ impl App {
             Modal::Secret { name, secret } => match key.code {
                 KeyCode::Enter | KeyCode::Esc => self.info(format!("token {name}: secret hidden")),
                 _ => self.modal = Some(Modal::Secret { name, secret }),
+            },
+            Modal::Details { .. } => match key.code {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('i' | 'q') => {}
+                KeyCode::Char(c) => self.tab_action(c),
+                _ => self.modal = Some(modal),
             },
             Modal::Form(mut form) => match key.code {
                 KeyCode::Esc => self.info("cancelled"),
@@ -849,6 +877,54 @@ fn dismiss_request(a: &Assessment) -> Request {
         summary: Some("dismissed in apti-tui".into()),
         source: None,
     })
+}
+
+/// The actor's summary, which carries the removal-request contact of aptid
+/// peers, or a hint if there is none.
+fn summary_or_hint(summary: &Option<String>) -> String {
+    summary
+        .clone()
+        .unwrap_or_else(|| "(none; refreshed with the actor document)".into())
+}
+
+fn following_details(f: &FollowingInfo, op: Option<&OperatorInfo>) -> Modal {
+    let operator = match op {
+        Some(o) => format!("{} ({})", o.id, source_label(&o.source)),
+        None => "(not yet known)".into(),
+    };
+    let mut rows = vec![
+        ("Actor", f.actor.clone()),
+        ("Handle", f.handle.clone().unwrap_or_else(|| "-".into())),
+        ("Name", f.name.clone().unwrap_or_else(|| "-".into())),
+        ("Summary / contact", summary_or_hint(&f.summary)),
+        ("Operator", operator),
+        ("State", f.state.clone()),
+        ("Evidence", f.evidence.to_string()),
+        ("Last sync", ago(f.last_sync)),
+        ("Last full sync", ago(f.last_full_sync)),
+    ];
+    if let Some(e) = &f.last_error {
+        rows.push(("Last error", e.clone()));
+    }
+    Modal::Details {
+        title: " Followed actor ".into(),
+        rows,
+        keys: "d unfollow  s resync  ⏎/Esc close",
+    }
+}
+
+fn follower_details(f: &FollowerInfo) -> Modal {
+    Modal::Details {
+        title: " Follower ".into(),
+        rows: vec![
+            ("Actor", f.actor.clone()),
+            ("Name", f.name.clone().unwrap_or_else(|| "-".into())),
+            ("Summary / contact", summary_or_hint(&f.summary)),
+            ("State", f.state.clone()),
+            ("Since", ago(Some(f.since))),
+        ],
+        keys: "a approve  x reject/remove  ⏎/Esc close",
+    }
 }
 
 // ------------------------------------------------------------------ drawing
@@ -1030,14 +1106,14 @@ fn draw(f: &mut Frame, app: &mut App) {
         Tab::Dashboard => "e edit default TLP and AMBER recipients",
         Tab::Following => match app.item().and_then(|i| app.source_rows().into_iter().nth(i)) {
             Some(SourceRow::Actor { follow: Some(_), .. }) => {
-                "a follow  d unfollow  s resync  t/e trust of its operator  m map to operator"
+                "i details  a follow  d unfollow  s resync  t/e trust of its operator  m map to operator"
             }
             Some(SourceRow::Actor { .. }) => {
                 "a follow  t/e trust of its operator  m map to operator"
             }
             _ => "a follow  t toggle trust  e edit trust/exception  c remove exception/default  m map actor",
         },
-        Tab::Followers => "a approve  x reject/remove",
+        Tab::Followers => "⏎/i details  a approve  x reject/remove",
         Tab::Behaviors => "e edit threshold / TTL / max age / TLP",
         Tab::Tokens => "a create  e edit scopes/TLP  n new secret  d delete",
         Tab::Review => "d dismiss  s suspend (b)  w allowlist (O)  h show resolved  ⏎ lookup",
@@ -1108,6 +1184,37 @@ fn draw(f: &mut Frame, app: &mut App) {
                         .borders(Borders::ALL)
                         .title(" Token created "),
                 ),
+                area,
+            );
+        }
+        Some(Modal::Details { title, rows, keys }) => {
+            const LABEL: usize = 20;
+            let width = 90u16;
+            let text_width = (width.min(f.area().width) as usize)
+                .saturating_sub(LABEL + 2)
+                .max(1);
+            // Wrapped lines per row; word wrapping needs some slack.
+            let height: usize = rows
+                .iter()
+                .map(|(_, v)| v.chars().count() * 6 / 5 / text_width + 1)
+                .sum();
+            let area = centered(f.area(), width, height as u16 + 4);
+            let mut lines: Vec<Line> = rows
+                .iter()
+                .map(|(k, v)| {
+                    Line::from(vec![
+                        Span::styled(format!("{k:<LABEL$}"), Style::default().fg(Color::Cyan)),
+                        Span::raw(v.clone()),
+                    ])
+                })
+                .collect();
+            lines.push(Line::from(""));
+            lines.push(Line::from(*keys).dark_gray());
+            f.render_widget(Clear, area);
+            f.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(Block::default().borders(Borders::ALL).title(title.as_str())),
                 area,
             );
         }
@@ -1719,9 +1826,36 @@ mod tests {
                 actor: a.to_string(),
                 state: "accepted".into(),
                 since: Utc::now(),
+                name: None,
+                summary: None,
             })
             .collect();
         app
+    }
+
+    #[test]
+    fn follower_details_show_contact_and_keep_actions() {
+        let mut app = app_with_followers(&["https://a.example/actor", "https://b.test/actor"]);
+        app.data.followers[1].state = "pending".into();
+        app.data.followers[1].summary =
+            Some("AP-TI feed operated by B. Removal requests: abuse@b.test".into());
+        app.table.select(Some(1));
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Details { .. })));
+        let s = screen(&mut app);
+        assert!(s.contains("Removal requests: abuse@b.test"), "{s}");
+        assert!(s.contains("a approve"), "{s}");
+        // Esc only closes the popup.
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.modal.is_none() && !app.quit);
+        // Reject from the popup asks for confirmation of the selected row.
+        app.on_key(KeyEvent::from(KeyCode::Char('i')));
+        app.on_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Confirm { request: Request::RejectFollower { actor }, .. })
+                if actor == "https://b.test/actor"
+        ));
     }
 
     fn screen(app: &mut App) -> String {
@@ -1809,7 +1943,26 @@ mod tests {
             last_full_sync: None,
             last_error: None,
             evidence,
+            name: None,
+            summary: None,
         }
+    }
+
+    #[test]
+    fn following_details_show_contact() {
+        let mut app = app_with_sources();
+        app.data.following[1].summary = Some("Removal requests: abuse@a.example".into());
+        // Row 1 is the followed actor a1 under operator A.
+        app.table.select(Some(1));
+        app.on_key(KeyEvent::from(KeyCode::Char('i')));
+        let s = screen(&mut app);
+        assert!(s.contains("Removal requests: abuse@a.example"), "{s}");
+        assert!(s.contains("https://a.example/org (verified)"), "{s}");
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        // The unfollowed actor a2 has no details.
+        app.table.select(Some(2));
+        app.on_key(KeyEvent::from(KeyCode::Char('i')));
+        assert!(app.modal.is_none());
     }
 
     /// Operator A runs a1 (followed) and a2 (not followed), the local

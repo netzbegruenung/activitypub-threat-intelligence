@@ -211,6 +211,11 @@ CREATE TABLE pending_opinions (
 -- TLP requested by the sensor; NULL = the behaviour's publish TLP.
 ALTER TABLE observations ADD COLUMN tlp TEXT;
 "#,
+    r#"
+-- Shown in the TUI, e.g. for the removal-request contact in the summary.
+ALTER TABLE remote_actors ADD COLUMN name TEXT;
+ALTER TABLE remote_actors ADD COLUMN summary TEXT;
+"#,
 ];
 
 #[derive(Clone)]
@@ -302,6 +307,8 @@ pub struct RemoteActor {
     pub public_key_pem: Option<String>,
     pub operator_claim: Option<String>,
     pub preferred_username: Option<String>,
+    pub name: Option<String>,
+    pub summary: Option<String>,
     pub fetched_at: DateTime<Utc>,
 }
 
@@ -323,22 +330,25 @@ fn remote_actor_row(r: &Row) -> rusqlite::Result<RemoteActor> {
         operator_claim: r.get(7)?,
         preferred_username: r.get(8)?,
         fetched_at: parse_ts(&r.get::<_, String>(9)?),
+        name: r.get(10)?,
+        summary: r.get(11)?,
     })
 }
 
 const REMOTE_ACTOR_COLS: &str = "id, inbox, shared_inbox, followers, active_objects, key_id, \
-     public_key_pem, operator_claim, preferred_username, fetched_at";
+     public_key_pem, operator_claim, preferred_username, fetched_at, name, summary";
 
 pub fn upsert_remote_actor(c: &Connection, a: &RemoteActor) -> anyhow::Result<()> {
     c.execute(
         "INSERT INTO remote_actors (id, inbox, shared_inbox, followers, active_objects, key_id,
-             public_key_pem, operator_claim, preferred_username, fetched_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             public_key_pem, operator_claim, preferred_username, fetched_at, name, summary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(id) DO UPDATE SET inbox = excluded.inbox, shared_inbox = excluded.shared_inbox,
              followers = excluded.followers, active_objects = excluded.active_objects,
              key_id = excluded.key_id, public_key_pem = excluded.public_key_pem,
              operator_claim = excluded.operator_claim,
-             preferred_username = excluded.preferred_username, fetched_at = excluded.fetched_at",
+             preferred_username = excluded.preferred_username, fetched_at = excluded.fetched_at,
+             name = excluded.name, summary = excluded.summary",
         params![
             a.id,
             a.inbox,
@@ -349,7 +359,9 @@ pub fn upsert_remote_actor(c: &Connection, a: &RemoteActor) -> anyhow::Result<()
             a.public_key_pem,
             a.operator_claim,
             a.preferred_username,
-            ts(a.fetched_at)
+            ts(a.fetched_at),
+            a.name,
+            a.summary
         ],
     )?;
     Ok(())
@@ -701,14 +713,18 @@ pub fn delete_follower(c: &Connection, actor: &str) -> anyhow::Result<bool> {
 }
 
 pub fn list_followers(c: &Connection) -> anyhow::Result<Vec<FollowerInfo>> {
-    let mut stmt =
-        c.prepare("SELECT actor, state, created FROM followers ORDER BY state DESC, actor")?;
+    let mut stmt = c.prepare(
+        "SELECT f.actor, f.state, f.created, a.name, a.summary FROM followers f
+         LEFT JOIN remote_actors a ON a.id = f.actor ORDER BY f.state DESC, f.actor",
+    )?;
     let rows = stmt
         .query_map([], |r| {
             Ok(FollowerInfo {
                 actor: r.get(0)?,
                 state: r.get(1)?,
                 since: parse_ts(&r.get::<_, String>(2)?),
+                name: r.get(3)?,
+                summary: r.get(4)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -1696,6 +1712,45 @@ mod tests {
             );
             mark_observation_published(c, &again[0], "https://a.example/s/1")?;
             assert!(pending_observations(c)?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn followers_carry_actor_summary() {
+        let db = Db::open_in_memory().unwrap();
+        db.call(|c| {
+            let actor = RemoteActor {
+                id: "https://b.example/actor".into(),
+                inbox: "https://b.example/actor/inbox".into(),
+                shared_inbox: None,
+                followers: None,
+                active_objects: None,
+                key_id: None,
+                public_key_pem: None,
+                operator_claim: None,
+                preferred_username: Some("ti".into()),
+                name: Some("B TI".into()),
+                summary: Some("Removal requests: abuse@b.example".into()),
+                fetched_at: parse_ts("2026-10-03T10:00:00Z"),
+            };
+            upsert_remote_actor(c, &actor)?;
+            assert_eq!(get_remote_actor(c, &actor.id)?, Some(actor.clone()));
+            upsert_follower(c, &actor.id, "https://b.example/f/1", "pending")?;
+            // Followers whose actor document is not cached have no summary.
+            upsert_follower(
+                c,
+                "https://c.example/actor",
+                "https://c.example/f/1",
+                "pending",
+            )?;
+            let f = list_followers(c)?;
+            assert_eq!(f.len(), 2);
+            assert_eq!(f[0].name.as_deref(), Some("B TI"));
+            assert_eq!(f[0].summary, actor.summary);
+            assert_eq!(f[1].summary, None);
             Ok(())
         })
         .await
