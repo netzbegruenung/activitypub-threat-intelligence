@@ -1,6 +1,6 @@
-//! Terminal UI for aptid (Appendix D): follow actors, set per-operator trust,
-//! per-behaviour k/T/M and TLP, approve followers, work the review queue and
-//! manage allowlists and REST API tokens.
+//! Terminal UI for aptid (Appendix D): follow actors and set trust for their
+//! operators, per-behaviour k/T/M and TLP, approve followers, work the review
+//! queue and manage allowlists and REST API tokens.
 
 mod client;
 mod form;
@@ -41,7 +41,6 @@ enum Tab {
     Dashboard,
     Following,
     Followers,
-    Operators,
     Behaviors,
     Tokens,
     Review,
@@ -50,11 +49,10 @@ enum Tab {
     Lookup,
 }
 
-const TABS: [(Tab, &str); 10] = [
+const TABS: [(Tab, &str); 9] = [
     (Tab::Dashboard, "Status"),
     (Tab::Following, "Following"),
     (Tab::Followers, "Followers"),
-    (Tab::Operators, "Operators"),
     (Tab::Behaviors, "Behaviours"),
     (Tab::Tokens, "Tokens"),
     (Tab::Review, "Review"),
@@ -172,6 +170,89 @@ fn policy_str(p: Option<OperatorPolicy>) -> String {
     }
 }
 
+/// Default policy of an operator followed by its per-behaviour exceptions.
+fn trust_str(o: &OperatorInfo) -> String {
+    let s = policy_str(o.default_policy);
+    if o.behavior_policies.is_empty() {
+        return s;
+    }
+    let except: Vec<String> = o
+        .behavior_policies
+        .iter()
+        .map(|(b, p)| {
+            let t = if p.trusted { "trusted" } else { "untrusted" };
+            format!("{b}: {t} w={}", p.weight)
+        })
+        .collect();
+    format!("{s} — except {}", except.join(", "))
+}
+
+/// One row of the Following tab: an operator followed by its actors.
+#[derive(Clone, Debug, PartialEq)]
+enum SourceRow {
+    /// Index into [`Data::operators`]; `None` groups followed actors whose
+    /// operator is not known yet.
+    Operator(Option<usize>),
+    Actor {
+        op: Option<usize>,
+        /// Index into [`Data::following`]; `None` if the actor is not followed.
+        follow: Option<usize>,
+        actor: String,
+    },
+}
+
+impl SourceRow {
+    fn op(&self) -> Option<usize> {
+        match self {
+            SourceRow::Operator(op) | SourceRow::Actor { op, .. } => *op,
+        }
+    }
+}
+
+/// Group actors under their operators. Followed actors without a known
+/// operator come last.
+fn source_rows(operators: &[OperatorInfo], following: &[FollowingInfo]) -> Vec<SourceRow> {
+    let follow = |a: &str| following.iter().position(|f| f.actor == a);
+    let mut rows = Vec::new();
+    for (i, o) in operators.iter().enumerate() {
+        rows.push(SourceRow::Operator(Some(i)));
+        rows.extend(o.actors.iter().map(|a| SourceRow::Actor {
+            op: Some(i),
+            follow: follow(a),
+            actor: a.clone(),
+        }));
+    }
+    let unknown: Vec<SourceRow> = following
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !operators.iter().any(|o| o.actors.contains(&f.actor)))
+        .map(|(i, f)| SourceRow::Actor {
+            op: None,
+            follow: Some(i),
+            actor: f.actor.clone(),
+        })
+        .collect();
+    if !unknown.is_empty() {
+        rows.push(SourceRow::Operator(None));
+        rows.extend(unknown);
+    }
+    rows
+}
+
+/// Rows of a tree to show given which rows match the filter: a matching
+/// header shows its whole group, a matching child also shows its header.
+/// `header_of[i]` is the header row of row `i` (itself for headers).
+fn tree_visible(hit: &[bool], header_of: &[usize]) -> Vec<usize> {
+    let mut show = vec![false; hit.len()];
+    for (i, &h) in header_of.iter().enumerate() {
+        if hit[i] || hit[h] {
+            show[i] = true;
+            show[h] = true;
+        }
+    }
+    (0..hit.len()).filter(|&i| show[i]).collect()
+}
+
 impl App {
     fn new(client: Client) -> Self {
         Self {
@@ -229,15 +310,13 @@ impl App {
                 if let Some(Reply::Following(f)) = self.call(Request::ListFollowing) {
                     self.data.following = f;
                 }
+                if let Some(Reply::Operators(o)) = self.call(Request::ListOperators) {
+                    self.data.operators = o;
+                }
             }
             Tab::Followers => {
                 if let Some(Reply::Followers(f)) = self.call(Request::ListFollowers) {
                     self.data.followers = f;
-                }
-            }
-            Tab::Operators => {
-                if let Some(Reply::Operators(o)) = self.call(Request::ListOperators) {
-                    self.data.operators = o;
                 }
             }
             Tab::Behaviors => {
@@ -294,9 +373,8 @@ impl App {
     fn cells(&self) -> Vec<Vec<Span<'static>>> {
         let d = &self.data;
         match self.current() {
-            Tab::Following => d.following.iter().map(following_cells).collect(),
+            Tab::Following => source_cells(d, &self.source_rows()),
             Tab::Followers => d.followers.iter().map(follower_cells).collect(),
-            Tab::Operators => d.operators.iter().map(operator_cells).collect(),
             Tab::Behaviors => d.behaviors.iter().map(behavior_cells).collect(),
             Tab::Tokens => d.tokens.iter().map(token_cells).collect(),
             Tab::Review => d.review.iter().map(review_cells).collect(),
@@ -317,12 +395,35 @@ impl App {
 
     /// Indices of the rows that pass the current tab's filter.
     fn visible_of(&self, cells: &[Vec<Span>]) -> Vec<usize> {
-        cells
+        let hit: Vec<bool> = cells
+            .iter()
+            .map(|c| row_matches(c, self.filter()))
+            .collect();
+        if self.current() != Tab::Following {
+            return (0..hit.len()).filter(|&i| hit[i]).collect();
+        }
+        let mut header = 0;
+        let header_of: Vec<usize> = self
+            .source_rows()
             .iter()
             .enumerate()
-            .filter(|(_, c)| row_matches(c, self.filter()))
-            .map(|(i, _)| i)
-            .collect()
+            .map(|(i, r)| {
+                if matches!(r, SourceRow::Operator(_)) {
+                    header = i;
+                }
+                header
+            })
+            .collect();
+        tree_visible(&hit, &header_of)
+    }
+
+    fn source_rows(&self) -> Vec<SourceRow> {
+        source_rows(&self.data.operators, &self.data.following)
+    }
+
+    /// The operator a Following row belongs to.
+    fn row_operator(&self, row: &SourceRow) -> Option<&OperatorInfo> {
+        row.op().and_then(|i| self.data.operators.get(i))
     }
 
     fn visible(&self) -> Vec<usize> {
@@ -403,7 +504,9 @@ impl App {
                 } else {
                     c as usize - '1' as usize
                 };
-                self.switch(i);
+                if i < TABS.len() {
+                    self.switch(i);
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let n = self.rows();
@@ -445,18 +548,7 @@ impl App {
         let i = self.item().unwrap_or(usize::MAX);
         match (self.current(), c) {
             (Tab::Following, 'a') => self.modal = Some(Modal::Form(Form::follow())),
-            (Tab::Following, 'd') => {
-                if let Some(f) = self.data.following.get(i) {
-                    let actor = f.actor.clone();
-                    self.confirm(format!("Unfollow {actor}?"), Request::Unfollow { actor });
-                }
-            }
-            (Tab::Following, 's') => {
-                if let Some(f) = self.data.following.get(i) {
-                    let actor = f.actor.clone();
-                    self.act(Request::Resync { actor }, "full resync scheduled");
-                }
-            }
+            (Tab::Following, _) => self.following_action(i, c),
             (Tab::Followers, 'a') => {
                 if let Some(f) = self.data.followers.get(i) {
                     let actor = f.actor.clone();
@@ -471,47 +563,6 @@ impl App {
                         Request::RejectFollower { actor },
                     );
                 }
-            }
-            (Tab::Operators, 't') => {
-                if let Some(o) = self.data.operators.get(i) {
-                    let cur = o.default_policy.unwrap_or_default();
-                    let policy = OperatorPolicy {
-                        trusted: !cur.trusted,
-                        weight: cur.weight,
-                    };
-                    let operator = o.id.clone();
-                    self.act(
-                        Request::SetOperatorPolicy {
-                            operator,
-                            behavior: None,
-                            policy,
-                        },
-                        if policy.trusted {
-                            "operator trusted"
-                        } else {
-                            "operator untrusted"
-                        },
-                    );
-                }
-            }
-            (Tab::Operators, 'e' | '\n') => {
-                if let Some(o) = self.data.operators.get(i) {
-                    self.modal = Some(Modal::Form(Form::operator_policy(o)));
-                }
-            }
-            (Tab::Operators, 'c') => {
-                if let Some(o) = self.data.operators.get(i) {
-                    self.modal = Some(Modal::Form(Form::clear_operator_policy(&o.id)));
-                }
-            }
-            (Tab::Operators, 'm') => {
-                let actor = self
-                    .data
-                    .operators
-                    .get(i)
-                    .and_then(|o| o.actors.first().cloned())
-                    .unwrap_or_default();
-                self.modal = Some(Modal::Form(Form::map_actor(&actor)));
             }
             (Tab::Behaviors, 'e' | '\n') => {
                 if let Some(b) = self.data.behaviors.get(i) {
@@ -602,6 +653,54 @@ impl App {
                 }
             }
             (Tab::Lookup, '/' | '\n' | 'l') => self.modal = Some(Modal::Form(Form::lookup())),
+            _ => {}
+        }
+    }
+
+    /// Actions on the Following tab. Trust actions on an actor row apply to
+    /// its operator.
+    fn following_action(&mut self, i: usize, c: char) {
+        let Some(row) = self.source_rows().into_iter().nth(i) else {
+            return;
+        };
+        let followed = match &row {
+            SourceRow::Actor {
+                follow: Some(f), ..
+            } => self.data.following.get(*f).map(|f| f.actor.clone()),
+            _ => None,
+        };
+        match (c, followed) {
+            ('d', Some(actor)) => {
+                self.confirm(format!("Unfollow {actor}?"), Request::Unfollow { actor })
+            }
+            ('s', Some(actor)) => {
+                self.act(Request::Resync { actor }, "full resync scheduled");
+            }
+            ('m', _) => {
+                let actor = match &row {
+                    SourceRow::Actor { actor, .. } => actor.clone(),
+                    SourceRow::Operator(_) => self
+                        .row_operator(&row)
+                        .and_then(|o| o.actors.first().cloned())
+                        .unwrap_or_default(),
+                };
+                self.modal = Some(Modal::Form(Form::map_actor(&actor)));
+            }
+            ('t' | 'e' | '\n' | 'c', _) => {
+                let Some(o) = self.row_operator(&row) else {
+                    self.info("operator not known yet; map the actor with m");
+                    return;
+                };
+                let modal = match c {
+                    't' => {
+                        let (text, request) = trust_toggle(o);
+                        Modal::Confirm { text, request }
+                    }
+                    'c' => Modal::Form(Form::clear_operator_policy(&o.id)),
+                    _ => Modal::Form(Form::operator_policy(o)),
+                };
+                self.modal = Some(modal);
+            }
             _ => {}
         }
     }
@@ -702,6 +801,43 @@ fn tlp_change(kind: &FormKind, req: &Request) -> Option<String> {
     ))
 }
 
+/// Confirmation text and request to flip an operator's default trust.
+fn trust_toggle(o: &OperatorInfo) -> (String, Request) {
+    let cur = o.default_policy.unwrap_or_default();
+    let policy = OperatorPolicy {
+        trusted: !cur.trusted,
+        weight: cur.weight,
+    };
+    let (verb, effect) = if policy.trusted {
+        ("Trust", "counts towards the quorum")
+    } else {
+        ("Untrust", "no longer counts towards the quorum")
+    };
+    let mut actors: Vec<&str> = o.actors.iter().take(3).map(String::as_str).collect();
+    let more = o.actors.len().saturating_sub(actors.len());
+    let more = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    if actors.is_empty() {
+        actors.push("none yet");
+    }
+    let text = format!(
+        "{verb} operator {}? Its evidence then {effect} (behaviour exceptions stay). \
+         Applies to {} actor(s): {}{more}.",
+        o.id,
+        o.actors.len(),
+        actors.join(", ")
+    );
+    let request = Request::SetOperatorPolicy {
+        operator: o.id.clone(),
+        behavior: None,
+        policy,
+    };
+    (text, request)
+}
+
 /// Suspend an active (O, b) pair with a local allowlist entry.
 fn dismiss_request(a: &Assessment) -> Request {
     Request::AddAllowlist(NewAllowlistEntry {
@@ -718,21 +854,14 @@ fn dismiss_request(a: &Assessment) -> Request {
 // ------------------------------------------------------------------ drawing
 
 const FOLLOWING_HEADER: [&str; 6] = [
-    "Actor",
+    "Operator / actor",
     "State",
-    "Operator",
+    "Trust",
     "Evidence",
     "Last sync",
     "Error",
 ];
 const FOLLOWERS_HEADER: [&str; 3] = ["Actor", "State", "Since"];
-const OPERATORS_HEADER: [&str; 5] = [
-    "Operator",
-    "Source",
-    "Default policy",
-    "Per behaviour",
-    "Actors",
-];
 const BEHAVIORS_HEADER: [&str; 5] = [
     "Behaviour",
     "Threshold (k)",
@@ -759,7 +888,6 @@ fn header(tab: Tab) -> &'static [&'static str] {
         Tab::Dashboard => &[],
         Tab::Following => &FOLLOWING_HEADER,
         Tab::Followers => &FOLLOWERS_HEADER,
-        Tab::Operators => &OPERATORS_HEADER,
         Tab::Behaviors => &BEHAVIORS_HEADER,
         Tab::Tokens => &TOKENS_HEADER,
         Tab::Review => &REVIEW_HEADER,
@@ -890,7 +1018,6 @@ fn draw(f: &mut Frame, app: &mut App) {
         Tab::Dashboard => draw_dashboard(f, app, main),
         Tab::Following => draw_following(f, app, main),
         Tab::Followers => draw_followers(f, app, main),
-        Tab::Operators => draw_operators(f, app, main),
         Tab::Behaviors => draw_behaviors(f, app, main),
         Tab::Tokens => draw_tokens(f, app, main),
         Tab::Review => draw_review(f, app, main),
@@ -901,11 +1028,16 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let keys = match app.current() {
         Tab::Dashboard => "e edit default TLP and AMBER recipients",
-        Tab::Following => "a follow  d unfollow  s resync",
+        Tab::Following => match app.item().and_then(|i| app.source_rows().into_iter().nth(i)) {
+            Some(SourceRow::Actor { follow: Some(_), .. }) => {
+                "a follow  d unfollow  s resync  t/e trust of its operator  m map to operator"
+            }
+            Some(SourceRow::Actor { .. }) => {
+                "a follow  t/e trust of its operator  m map to operator"
+            }
+            _ => "a follow  t toggle trust  e edit trust/exception  c remove exception/default  m map actor",
+        },
         Tab::Followers => "a approve  x reject/remove",
-        Tab::Operators => {
-            "e edit trust/weight  t toggle trusted  c clear behaviour policy  m map actor→operator"
-        }
         Tab::Behaviors => "e edit threshold / TTL / max age / TLP",
         Tab::Tokens => "a create  e edit scopes/TLP  n new secret  d delete",
         Tab::Review => "d dismiss  s suspend (b)  w allowlist (O)  h show resolved  ⏎ lookup",
@@ -941,7 +1073,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     match &app.modal {
         Some(Modal::Form(form)) => form.draw(f),
         Some(Modal::Confirm { text, .. }) => {
-            let area = centered(f.area(), 60, 7);
+            // Grow with the text; word wrapping needs some slack per line.
+            let lines = text.chars().count() / 60 + 1;
+            let area = centered(f.area(), 72, lines as u16 + 5);
             f.render_widget(Clear, area);
             f.render_widget(
                 Paragraph::new(vec![
@@ -1039,32 +1173,109 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
-fn following_cells(x: &FollowingInfo) -> Vec<Span<'static>> {
-    let state = match x.state.as_str() {
-        "accepted" => Span::from("accepted").green(),
-        "rejected" => Span::from("rejected").red(),
-        s => Span::from(s.to_string()).yellow(),
-    };
-    vec![
-        Span::from(x.handle.clone().unwrap_or_else(|| x.actor.clone())),
-        state,
-        Span::from(x.operator.clone().unwrap_or_default()),
-        Span::from(x.evidence.to_string()),
-        Span::from(ago(x.last_sync)),
-        Span::from(x.last_error.clone().unwrap_or_default()).red(),
-    ]
+/// How the actor→operator mapping of an operator was established.
+fn source_label(source: &str) -> String {
+    match source {
+        "verified" => "verified",
+        "psl" => "by domain",
+        "manual" => "manual",
+        "local" => "this node",
+        "policy" => "policy only",
+        s => s,
+    }
+    .into()
+}
+
+fn source_cells(d: &Data, rows: &[SourceRow]) -> Vec<Vec<Span<'static>>> {
+    let ops = &d.operators;
+    let follow = |i: Option<usize>| i.and_then(|i| d.following.get(i));
+    rows.iter()
+        .enumerate()
+        .map(|(n, row)| match row {
+            SourceRow::Operator(None) => vec![
+                Span::from("(operator not yet known)").dark_gray(),
+                Span::from(""),
+                Span::from(""),
+                Span::from(""),
+                Span::from(""),
+                Span::from(""),
+            ],
+            SourceRow::Operator(Some(i)) => {
+                let o = &ops[*i];
+                let evidence: u64 = d
+                    .following
+                    .iter()
+                    .filter(|f| o.actors.contains(&f.actor))
+                    .map(|f| f.evidence)
+                    .sum();
+                let trusted = o.default_policy.is_some_and(|p| p.trusted);
+                vec![
+                    Span::from(o.id.clone()).bold(),
+                    Span::from(source_label(&o.source)),
+                    Span::styled(
+                        trust_str(o),
+                        Style::default().fg(if trusted {
+                            Color::Green
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                    Span::from(evidence.to_string()),
+                    Span::from(""),
+                    Span::from(""),
+                ]
+            }
+            SourceRow::Actor {
+                op,
+                follow: fi,
+                actor,
+            } => {
+                let last = !matches!(rows.get(n + 1), Some(SourceRow::Actor { .. }));
+                let branch = if last { "└ " } else { "├ " };
+                let f = follow(*fi);
+                let local = op.is_some_and(|i| ops[i].source == "local");
+                let state = match f.map(|f| f.state.as_str()) {
+                    Some("accepted") => Span::from("accepted").green(),
+                    Some("rejected") => Span::from("rejected").red(),
+                    Some(s) => Span::from(s.to_string()).yellow(),
+                    None if local => Span::from("this node").dark_gray(),
+                    None => Span::from("not followed").dark_gray(),
+                };
+                let trust = op
+                    .map(|i| format!("↑ {}", trust_str(&ops[i])))
+                    .unwrap_or_default();
+                let name = f
+                    .and_then(|f| f.handle.clone())
+                    .unwrap_or_else(|| actor.clone());
+                vec![
+                    Span::from(format!("{branch}{name}")),
+                    state,
+                    Span::from(trust).dark_gray(),
+                    Span::from(f.map(|f| f.evidence.to_string()).unwrap_or_default()),
+                    Span::from(f.map(|f| ago(f.last_sync)).unwrap_or_default()),
+                    Span::from(f.and_then(|f| f.last_error.clone()).unwrap_or_default()).red(),
+                ]
+            }
+        })
+        .collect()
 }
 
 fn draw_following(f: &mut Frame, app: &mut App, area: Rect) {
     let widths = vec![
-        Constraint::Percentage(28),
-        Constraint::Length(9),
-        Constraint::Percentage(25),
+        Constraint::Percentage(30),
+        Constraint::Length(12),
+        Constraint::Percentage(30),
         Constraint::Length(8),
         Constraint::Length(10),
         Constraint::Fill(1),
     ];
-    draw_table(f, app, area, widths, " Following (following ≠ trusting) ");
+    draw_table(
+        f,
+        app,
+        area,
+        widths,
+        " Following — actors grouped by operator; trust is set per operator ",
+    );
 }
 
 fn follower_cells(x: &FollowerInfo) -> Vec<Span<'static>> {
@@ -1092,45 +1303,6 @@ fn draw_followers(f: &mut Frame, app: &mut App, area: Rect) {
         area,
         widths,
         " Followers (accepted followers receive TLP:GREEN) ",
-    );
-}
-
-fn operator_cells(o: &OperatorInfo) -> Vec<Span<'static>> {
-    let default = Span::styled(
-        policy_str(o.default_policy),
-        match o.default_policy {
-            Some(p) if p.trusted => Style::default().fg(Color::Green),
-            _ => Style::default().fg(Color::DarkGray),
-        },
-    );
-    let per: Vec<String> = o
-        .behavior_policies
-        .iter()
-        .map(|(b, p)| format!("{b}:{}{}", if p.trusted { "✓" } else { "✗" }, p.weight))
-        .collect();
-    vec![
-        Span::from(o.id.clone()),
-        Span::from(o.source.clone()),
-        default,
-        Span::from(per.join(" ")),
-        Span::from(o.actors.join(", ")),
-    ]
-}
-
-fn draw_operators(f: &mut Frame, app: &mut App, area: Rect) {
-    let widths = vec![
-        Constraint::Percentage(25),
-        Constraint::Length(9),
-        Constraint::Length(20),
-        Constraint::Percentage(25),
-        Constraint::Fill(1),
-    ];
-    draw_table(
-        f,
-        app,
-        area,
-        widths,
-        " Operators — trust and weight w(p, b) ",
     );
 }
 
@@ -1612,6 +1784,164 @@ mod tests {
         assert!(s.contains(" 2/3 (5) "), "{s}");
         assert!(s.contains('▲') && s.contains('▼'), "{s}");
         assert!(!s.contains("b.test"));
+    }
+
+    fn operator(id: &str, source: &str, actors: &[&str], trusted: bool) -> OperatorInfo {
+        OperatorInfo {
+            id: id.into(),
+            source: source.into(),
+            actors: actors.iter().map(|a| a.to_string()).collect(),
+            default_policy: Some(OperatorPolicy {
+                trusted,
+                weight: 1.0,
+            }),
+            behavior_policies: vec![],
+        }
+    }
+
+    fn followed(actor: &str, evidence: u64) -> FollowingInfo {
+        FollowingInfo {
+            actor: actor.into(),
+            handle: None,
+            state: "accepted".into(),
+            operator: None,
+            last_sync: None,
+            last_full_sync: None,
+            last_error: None,
+            evidence,
+        }
+    }
+
+    /// Operator A runs a1 (followed) and a2 (not followed), the local
+    /// operator runs the own actor, and x is followed with no operator yet.
+    fn app_with_sources() -> App {
+        let mut app = App::new(Client::new("/nonexistent".into()));
+        app.tab = TABS.iter().position(|(t, _)| *t == Tab::Following).unwrap();
+        app.data.operators = vec![
+            operator(
+                "https://a.example/org",
+                "verified",
+                &["https://a.example/a1", "https://a.example/a2"],
+                true,
+            ),
+            operator(
+                "https://self.test/org",
+                "local",
+                &["https://self.test/actor"],
+                false,
+            ),
+        ];
+        app.data.following = vec![
+            followed("https://x.test/actor", 1),
+            followed("https://a.example/a1", 5),
+        ];
+        app
+    }
+
+    #[test]
+    fn groups_actors_under_operators() {
+        let app = app_with_sources();
+        let rows = app.source_rows();
+        let actor = |op, follow, a: &str| SourceRow::Actor {
+            op,
+            follow,
+            actor: a.into(),
+        };
+        assert_eq!(
+            rows,
+            vec![
+                SourceRow::Operator(Some(0)),
+                actor(Some(0), Some(1), "https://a.example/a1"),
+                actor(Some(0), None, "https://a.example/a2"),
+                SourceRow::Operator(Some(1)),
+                actor(Some(1), None, "https://self.test/actor"),
+                SourceRow::Operator(None),
+                actor(None, Some(0), "https://x.test/actor"),
+            ]
+        );
+        let cells = app.cells();
+        let text = |r: usize, c: usize| cells[r][c].content.to_string();
+        assert_eq!(text(0, 3), "5");
+        assert_eq!(text(1, 0), "├ https://a.example/a1");
+        assert_eq!(text(2, 0), "└ https://a.example/a2");
+        assert_eq!(text(2, 1), "not followed");
+        assert_eq!(text(2, 2), "↑ trusted, w=1");
+        assert_eq!(text(4, 1), "this node");
+    }
+
+    #[test]
+    fn filter_keeps_groups_together() {
+        let mut app = app_with_sources();
+        // A matching actor brings its operator along.
+        app.set_filter(vec!["a2".into()]);
+        assert_eq!(app.visible(), vec![0, 2]);
+        // A matching operator shows all of its actors.
+        app.set_filter(vec!["self.test/org".into()]);
+        assert_eq!(app.visible(), vec![3, 4]);
+        app.set_filter(vec!["".into(), "not followed".into()]);
+        assert_eq!(app.visible(), vec![0, 2]);
+    }
+
+    #[test]
+    fn trust_on_actor_row_targets_its_operator() {
+        let mut app = app_with_sources();
+        app.table.select(Some(2));
+        app.tab_action('t');
+        let Some(Modal::Confirm { text, request }) = app.modal.take() else {
+            panic!("expected confirmation")
+        };
+        assert!(
+            text.starts_with("Untrust operator https://a.example/org?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("2 actor(s): https://a.example/a1, https://a.example/a2."),
+            "{text}"
+        );
+        assert_eq!(
+            request,
+            Request::SetOperatorPolicy {
+                operator: "https://a.example/org".into(),
+                behavior: None,
+                policy: OperatorPolicy {
+                    trusted: false,
+                    weight: 1.0
+                },
+            }
+        );
+        // Unfollow only applies to followed actors.
+        app.tab_action('d');
+        assert!(app.modal.is_none());
+        app.table.select(Some(1));
+        app.tab_action('d');
+        assert!(matches!(app.modal, Some(Modal::Confirm { .. })));
+        // Trust needs a known operator.
+        app.modal = None;
+        app.table.select(Some(6));
+        app.tab_action('t');
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn trust_shows_behaviour_exceptions() {
+        let mut o = operator("op", "psl", &[], true);
+        o.behavior_policies = vec![(
+            apti_core::Behavior::Scan,
+            OperatorPolicy {
+                trusted: false,
+                weight: 0.0,
+            },
+        )];
+        assert_eq!(trust_str(&o), "trusted, w=1 — except scan: untrusted w=0");
+    }
+
+    #[test]
+    fn draws_following_tree() {
+        let mut app = app_with_sources();
+        let s = screen(&mut app);
+        assert!(s.contains("https://a.example/org"), "{s}");
+        assert!(s.contains("(operator not yet known)"), "{s}");
+        assert!(s.contains(" 1/7 "), "{s}");
     }
 
     #[test]

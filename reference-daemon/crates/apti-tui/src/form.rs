@@ -91,9 +91,13 @@ fn tlp_options(tlps: &[Tlp], default: bool) -> Vec<String> {
         .collect()
 }
 
-/// `*` (operator default) followed by every behaviour.
+/// Option for an operator's default policy, which applies to every
+/// behaviour without an exception.
+const ALL_BEHAVIORS: &str = "all (default)";
+
+/// The operator default followed by every behaviour.
 fn behavior_options() -> Vec<String> {
-    std::iter::once("*".to_string())
+    std::iter::once(ALL_BEHAVIORS.to_string())
         .chain(Behavior::ALL.iter().map(|b| b.as_str().to_string()))
         .collect()
 }
@@ -144,7 +148,7 @@ fn parse_bool(s: &str) -> Result<bool, String> {
 
 fn parse_behavior_opt(s: &str) -> Result<Option<Behavior>, String> {
     match s.trim() {
-        "" | "*" => Ok(None),
+        "" | "*" | ALL_BEHAVIORS => Ok(None),
         b => b.parse().map(Some),
     }
 }
@@ -199,16 +203,16 @@ impl Form {
     pub fn operator_policy(o: &OperatorInfo) -> Self {
         let p = o.default_policy.unwrap_or_default();
         Self::new(
-            format!(" Trust policy: {} ", o.id),
+            format!(" Trust policy: {} ({} actors) ", o.id, o.actors.len()),
             FormKind::OperatorPolicy {
                 operator: o.id.clone(),
             },
             vec![
                 select(
-                    "Behaviour",
+                    "Applies to",
                     behavior_options(),
-                    "*",
-                    "* = operator default, or a specific behaviour",
+                    ALL_BEHAVIORS,
+                    "all = default; a behaviour = exception for it only (repeat for more)",
                 ),
                 select(
                     "Trusted",
@@ -227,15 +231,15 @@ impl Form {
 
     pub fn clear_operator_policy(operator: &str) -> Self {
         Self::new(
-            format!(" Clear policy: {operator} "),
+            format!(" Remove policy: {operator} "),
             FormKind::ClearOperatorPolicy {
                 operator: operator.to_string(),
             },
             vec![select(
-                "Behaviour",
+                "Remove",
                 behavior_options(),
-                "*",
-                "* = operator default, or a behaviour",
+                ALL_BEHAVIORS,
+                "default (back to untrusted), or one behaviour's exception",
             )],
         )
     }
@@ -694,6 +698,26 @@ mod tests {
         assert_eq!(default_tlp, Some(Tlp::Amber));
         f.fields[0].value = "0".into();
         assert!(f.to_request().is_err());
+    }
+
+    #[test]
+    fn operator_policy_default_or_exception() {
+        let o = OperatorInfo {
+            id: "op".into(),
+            source: "psl".into(),
+            actors: vec!["a".into()],
+            default_policy: None,
+            behavior_policies: vec![],
+        };
+        let mut f = Form::operator_policy(&o);
+        let behavior = |f: &Form| match f.to_request().unwrap() {
+            Request::SetOperatorPolicy { behavior, .. } => behavior,
+            r => panic!("{r:?}"),
+        };
+        assert_eq!(f.fields[0].value, ALL_BEHAVIORS);
+        assert_eq!(behavior(&f), None);
+        f.fields[0].value = "scan".into();
+        assert_eq!(behavior(&f), Some(Behavior::Scan));
     }
 
     #[test]
