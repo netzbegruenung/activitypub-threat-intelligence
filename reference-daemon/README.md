@@ -539,7 +539,7 @@ show the position of the selected row; with a filter active it reads
 | Tab | Actions |
 |---|---|
 | Status | Counters, queues, last recompute; TLP addressing overview. `e` set the default TLP and the AMBER recipient list |
-| Following | `a` follow (`user@host` or URL), `d` unfollow, `s` full resync |
+| Following | `a` follow (`user@host` or URL), `d` unfollow, `s` full resync (also refetches the actor document, e.g. a changed contact), `i` details |
 | Followers | `a` approve, `x` reject or remove (needed for TLP:GREEN) |
 | Operators | `e` set trusted/weight (operator default or per behaviour), `t` toggle trust, `c` clear a policy, `m` override actor→operator mapping |
 | Behaviours | `e` set `k` (number or `off`), T, M and the publish TLP per behaviour |

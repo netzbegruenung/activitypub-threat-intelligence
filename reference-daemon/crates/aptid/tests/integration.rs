@@ -609,6 +609,40 @@ async fn federation_between_two_daemons() {
     })
     .await;
 
+    // A resync also refreshes the cached actor document, e.g. its summary.
+    let following_summary = || async {
+        let Reply::Following(f) = ctl(&b, Request::ListFollowing).await else {
+            panic!("expected following");
+        };
+        f.into_iter().find(|f| f.actor == a_actor).unwrap().summary
+    };
+    assert_eq!(
+        following_summary().await.as_deref(),
+        Some("AP-TI threat intelligence feed operated by Org a.")
+    );
+    let id = a_actor.clone();
+    b.state
+        .db
+        .call(move |c| {
+            let mut cached = db::get_remote_actor(c, &id)?.unwrap();
+            cached.summary = Some("stale".into());
+            db::upsert_remote_actor(c, &cached)
+        })
+        .await
+        .unwrap();
+    assert_eq!(following_summary().await.as_deref(), Some("stale"));
+    ctl_ok(
+        &b,
+        Request::Resync {
+            actor: a_actor.clone(),
+        },
+    )
+    .await;
+    assert_eq!(
+        following_summary().await.as_deref(),
+        Some("AP-TI threat intelligence feed operated by Org a.")
+    );
+
     // Unfollow is delivered as Undo.
     ctl_ok(
         &b,
