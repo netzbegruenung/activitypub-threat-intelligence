@@ -2,11 +2,13 @@
 //! enforcement points read the active list (Section 9), and automation
 //! manages the allowlist.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use apti_core::normalize;
 use apti_core::protocol::{
     AllowlistEntry, AllowlistScope, ApiScope, ApiTokenInfo, NewAllowlistEntry,
 };
-use apti_core::{Behavior, ObservableType, Tlp, FUTURE_TOLERANCE_SECS, MAX_BATCH};
+use apti_core::{Behavior, EvidenceKind, ObservableType, Tlp, FUTURE_TOLERANCE_SECS, MAX_BATCH};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -34,6 +36,7 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/api/v1/observations", post(push))
         .route("/api/v1/active", get(active))
+        .route("/api/v1/timeline", get(timeline))
         .route("/api/v1/allowlist", get(allowlist_list).post(allowlist_add))
         .route(
             "/api/v1/allowlist/{id}",
@@ -347,6 +350,215 @@ async fn active(
         generated: now,
         last_recompute,
         entries,
+    })
+    .into_response()
+}
+
+// ----------------------------------------------------------------- timeline
+
+/// Default length of the timeline window.
+const TIMELINE_DEFAULT_DAYS: i64 = 30;
+
+#[derive(Debug, Deserialize)]
+pub struct TimelineQuery {
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    #[serde(rename = "type")]
+    pub observable_type: Option<ObservableType>,
+    pub behavior: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineOrigin {
+    /// Our own Sightings.
+    Local,
+    /// Evidence received from followed actors.
+    Federated,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineEntry {
+    pub observable_type: ObservableType,
+    pub observable_value: String,
+    pub behavior: Behavior,
+    pub kind: EvidenceKind,
+    pub origin: TimelineOrigin,
+    /// `attributedTo`: the actor that published the evidence.
+    pub actor: String,
+    /// `firstSeen` of a Sighting, `validFrom` of a ThreatIndicator.
+    pub start: DateTime<Utc>,
+    /// `lastSeen` of a Sighting, `validUntil` of a ThreatIndicator.
+    pub end: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+    pub tlp: Tlp,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Timeline {
+    pub generated: DateTime<Utc>,
+    pub since: DateTime<Utc>,
+    pub until: DateTime<Utc>,
+    pub entries: Vec<TimelineEntry>,
+    /// Display details of the actors in `entries`.
+    pub actors: BTreeMap<String, TimelineActor>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineActor {
+    /// `user@host`, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    /// Display name, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Remote actor strings, made safe for display.
+fn display_string(s: Option<&str>) -> Option<String> {
+    let s: String = s?.chars().filter(|c| !c.is_control()).take(100).collect();
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn actor_handle(username: Option<&str>, id: &str) -> Option<String> {
+    let host = url::Url::parse(id).ok()?.host_str()?.to_string();
+    Some(format!("{}@{host}", display_string(username)?))
+}
+
+/// Observation periods of stored evidence overlapping `[since, until]`, one
+/// entry per evidence object and behaviour. Locally allowlisted observables
+/// are left out, like on the active list.
+async fn timeline(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<TimelineQuery>,
+) -> Response {
+    let token = match authorise(&state, &headers, ApiScope::Read).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let behavior = match q
+        .behavior
+        .as_deref()
+        .map(str::parse::<Behavior>)
+        .transpose()
+    {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, &e),
+    };
+    let now = Utc::now();
+    let until = q.until.unwrap_or(now);
+    let since = q
+        .since
+        .unwrap_or(until - TimeDelta::days(TIMELINE_DEFAULT_DAYS));
+    if since >= until {
+        return error(StatusCode::BAD_REQUEST, "`since` must be before `until`");
+    }
+    let ty = q.observable_type;
+    let (evidence, allow_db) = match state
+        .db
+        .call(move |c| Ok((db::timeline_evidence(c, ty)?, db::list_allowlist(c)?)))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
+    };
+    let allow = LocalAllowlist::new(&state, &allow_db, now);
+    let mut entries = Vec::new();
+    for (o, local) in evidence {
+        if o.tlp > token.max_tlp {
+            continue;
+        }
+        let (Some(ty), Some(value)) = (o.observable_type, o.observable_value.as_deref()) else {
+            continue;
+        };
+        if ty == ObservableType::Unknown {
+            continue;
+        }
+        let (start, end) = match o.kind {
+            EvidenceKind::Sighting => (o.first_seen, o.last_seen),
+            _ => (o.valid_from, o.valid_until),
+        };
+        let start = start.unwrap_or(o.published);
+        let end = end.unwrap_or(start).max(start);
+        if end < since || start > until {
+            continue;
+        }
+        for &b in &o.observed_behavior {
+            if behavior.is_some_and(|f| f != b) || allow.covers(ty, value, Some(b)) {
+                continue;
+            }
+            entries.push(TimelineEntry {
+                observable_type: ty,
+                observable_value: value.to_string(),
+                behavior: b,
+                kind: o.kind,
+                origin: if local {
+                    TimelineOrigin::Local
+                } else {
+                    TimelineOrigin::Federated
+                },
+                actor: o.attributed_to.clone(),
+                start,
+                end,
+                count: o.count,
+                tlp: o.tlp,
+            });
+        }
+    }
+    entries.sort_by(|a, b| {
+        (a.start, &a.observable_value, a.behavior).cmp(&(b.start, &b.observable_value, b.behavior))
+    });
+    let ids: BTreeSet<String> = entries.iter().map(|e| e.actor.clone()).collect();
+    let local_actor = state.urls.actor.clone();
+    let remote = match state
+        .db
+        .call(move |c| {
+            ids.into_iter()
+                .filter(|id| *id != local_actor)
+                .map(|id| Ok((db::get_remote_actor(c, &id)?, id)))
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
+    };
+    let mut actors = BTreeMap::new();
+    if entries.iter().any(|e| e.actor == state.urls.actor) {
+        let i = &state.cfg.instance;
+        actors.insert(
+            state.urls.actor.clone(),
+            TimelineActor {
+                handle: actor_handle(Some(&i.username), &state.urls.actor),
+                name: display_string(Some(&i.organization)),
+            },
+        );
+    }
+    for (a, id) in remote {
+        let info = match &a {
+            Some(a) => TimelineActor {
+                handle: actor_handle(a.preferred_username.as_deref(), &id),
+                name: display_string(a.name.as_deref()),
+            },
+            None => TimelineActor {
+                handle: None,
+                name: None,
+            },
+        };
+        actors.insert(id, info);
+    }
+    Json(Timeline {
+        generated: now,
+        since,
+        until,
+        entries,
+        actors,
     })
     .into_response()
 }

@@ -1659,6 +1659,28 @@ pub fn count_active(c: &Connection, now: DateTime<Utc>) -> anyhow::Result<(u64, 
     Ok((active, flagged))
 }
 
+/// Live, non-revoked Sightings and ThreatIndicators with their `local` flag,
+/// for the timeline API. Opinions carry no observation period.
+pub fn timeline_evidence(
+    c: &Connection,
+    ty: Option<ObservableType>,
+) -> anyhow::Result<Vec<(EvidenceObject, bool)>> {
+    let mut stmt = c.prepare(
+        "SELECT object, local FROM evidence
+         WHERE deleted IS NULL AND kind IN ('Sighting', 'ThreatIndicator')
+           AND (?1 IS NULL OR observable_type = ?1)",
+    )?;
+    let rows = stmt
+        .query_map(params![ty.map(|t| t.as_str())], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+        })?
+        .filter_map(|r| r.ok())
+        .filter_map(|(s, local)| Some((serde_json::from_str::<EvidenceObject>(&s).ok()?, local)))
+        .filter(|(o, _)| !o.is_revoked())
+        .collect();
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

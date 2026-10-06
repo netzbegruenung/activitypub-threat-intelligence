@@ -1,0 +1,41 @@
+# apti-dashboard example configuration.
+
+[aptid]
+# aptid internal REST API ([api].bind in the aptid config).
+url = "http://127.0.0.1:8081"
+# Token with scope "read". Create it in apti-tui (Tokens tab); the secret is
+# shown only once. Its max_tlp limits what ends up on the page, so pick the
+# TLP of the audience that can open the page.
+read_token = "apti_change-me-dashboard-read"
+timeout_secs = 30
+
+[geoip]
+# MaxMind DB with country records, e.g. DB-IP "IP to Country Lite"
+# (CC BY 4.0, https://db-ip.com/db/download/ip-to-country-lite) or MaxMind
+# GeoLite2-Country. Read anew on every run, so it can be updated in place.
+country_db = "/var/lib/apti-dashboard/dbip-country-lite.mmdb"
+
+[dns]
+# Place domain findings by resolving them. This sends DNS queries for
+# domains that are listed as malicious; their name servers may be run by
+# the attacker and learn that you looked. Off by default: domains are then
+# left out of the map.
+resolve_domains = false
+timeout_secs = 5
+concurrency = 16
+
+[dashboard]
+# Written atomically (temporary file + rename) on every run.
+output = "/var/www/apti-dashboard/index.html"
+title = "AP-TI threat map"
+# The slider covers range_days. Each position counts the findings seen
+# within the window_days before it; positions are step_hours apart.
+range_days = 30
+window_days = 7
+step_hours = 24
+# Behaviours to include; empty = all.
+behaviors = []
+# Clicking a country lists the IPs, prefixes and domains behind its count,
+# with behaviours, publishing actors and counts. This puts the observables
+# into the page; set to false for per-country counts only.
+show_observables = true
