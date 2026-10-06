@@ -1,0 +1,31 @@
+# Example: let apti-fail2ban parse the logs of other containers.
+#
+#   docker compose -f compose.yaml -f compose.landscape.example.yaml up -d
+#
+# Each service writes its log to a named volume (files, not stdout). The same
+# volume is mounted read-only into apti-fail2ban, and a jail in
+# fail2ban/jail.d/ follows the file. Replace the services below by your own;
+# only the volume wiring matters.
+services:
+  apache:
+    image: httpd:2.4-alpine
+    volumes:
+      - apache-logs:/usr/local/apache2/logs   # access_log, error_log
+    ports: ["80:80"]
+
+  sshd:
+    image: linuxserver/openssh-server    # example: logs to a file
+    environment:
+      - LOG_STDOUT=            # empty = log to /config/logs/openssh/current
+    volumes:
+      - sshd-logs:/config/logs
+    ports: ["2222:2222"]
+
+  apti-fail2ban:
+    volumes:
+      - apache-logs:/var/log/apache2:ro
+      - sshd-logs:/var/log/sshd:ro
+
+volumes:
+  apache-logs:
+  sshd-logs:

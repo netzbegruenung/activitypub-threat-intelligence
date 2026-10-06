@@ -1,0 +1,6 @@
+[DEFAULT]
+# nftables on the host (the container shares the host network).
+banaction = nftables
+banaction_allports = nftables[type=allports]
+# Container log volumes are not reliably watched by inotify.
+backend = polling

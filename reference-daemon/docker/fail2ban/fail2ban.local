@@ -1,0 +1,4 @@
+[Definition]
+# apti-fail2ban push follows this file, so it must be a file (not syslog).
+logtarget = /var/log/fail2ban.log
+loglevel = INFO
