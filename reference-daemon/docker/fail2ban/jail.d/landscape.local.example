@@ -1,0 +1,12 @@
+# Jails for the logs mounted by compose.landscape.example.yaml.
+# Copy to landscape.local (only *.local and *.conf are read).
+# Each jail's name must be mapped in [push.jails.<name>] of apti-fail2ban.toml.
+[apache-auth]
+enabled = true
+port    = http,https
+logpath = /var/log/apache2/error_log
+
+[sshd]
+enabled = true
+port    = ssh
+logpath = /var/log/sshd/openssh/current

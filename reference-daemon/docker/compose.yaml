@@ -1,0 +1,67 @@
+# aptid + apti-fail2ban. Images are built locally, nothing is pulled from or
+# pushed to a registry:
+#
+#   cp .env.example .env            # pick the release tag
+#   cp config/aptid.example.toml config/aptid.toml            # edit
+#   cp config/apti-fail2ban.example.toml config/apti-fail2ban.toml
+#   docker compose build
+#   docker compose up -d aptid
+#   docker compose exec aptid apti-tui --socket /run/aptid/control.sock   # create tokens
+#   # put the tokens into config/apti-fail2ban.toml, then:
+#   docker compose up -d apti-fail2ban
+name: apti
+
+services:
+  aptid:
+    build:
+      context: .
+      dockerfile: Dockerfile.aptid
+      args:
+        APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
+    image: apti/aptid:${APTI_VERSION}
+    restart: unless-stopped
+    volumes:
+      - ./config/aptid.toml:/etc/aptid/config.toml:ro
+      - aptid-data:/var/lib/aptid
+      - aptid-run:/run/aptid
+    ports:
+      # ActivityPub listener: put a TLS reverse proxy in front (keep Host).
+      - "127.0.0.1:8080:8080"
+      # Internal REST API. Never expose it to the Internet.
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /api/v1/health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"ok\"' <&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  apti-fail2ban:
+    build:
+      context: ..    # reference-daemon/, for the fail2ban filter
+      dockerfile: docker/Dockerfile.apti-fail2ban
+      args:
+        APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
+    image: apti/apti-fail2ban:${APTI_VERSION}
+    restart: unless-stopped
+    depends_on:
+      aptid:
+        condition: service_healthy
+    # Bans are applied to the host's netfilter, so the container shares the
+    # host network and needs these capabilities. This is the only privileged
+    # part of the setup. aptid is reached through its published port.
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW]
+    volumes:
+      - ./config/apti-fail2ban.toml:/etc/apti-fail2ban/config.toml:ro
+      - ./fail2ban/fail2ban.local:/etc/fail2ban/fail2ban.local:ro
+      - ./fail2ban/jail.d:/etc/fail2ban/jail.d:ro
+      - f2b-state:/var/lib/apti-fail2ban
+      - f2b-pull:/var/log/apti-fail2ban
+      # Logs of other containers: see compose.landscape.example.yaml.
+
+volumes:
+  aptid-data:
+  aptid-run:
+  f2b-state:
+  f2b-pull:

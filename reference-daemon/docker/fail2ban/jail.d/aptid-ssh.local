@@ -1,0 +1,11 @@
+# Ban IPs from the aptid active list (written by `apti-fail2ban pull`).
+# bantime must exceed refresh_secs + interval_secs of [pull] (1800 + 300).
+[aptid-ssh]
+enabled  = true
+filter   = apti
+logpath  = /var/log/apti-fail2ban/ssh.log
+port     = ssh
+maxretry = 1
+findtime = 3600
+bantime  = 3600
+bantime.increment = false

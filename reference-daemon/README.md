@@ -29,6 +29,10 @@ cp config.example.toml /etc/aptid/config.toml   # then edit it
 
 Logging uses `RUST_LOG`, e.g. `RUST_LOG=aptid=debug`.
 
+For containers, see [`docker/README.md`](docker/README.md): a compose file for
+`aptid` and for `apti-fail2ban` (with fail2ban inside), built locally from the
+release binaries.
+
 ### Audit log
 
 With `[audit] enabled = true` the daemon logs every change to an observable
