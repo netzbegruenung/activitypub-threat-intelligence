@@ -113,6 +113,13 @@ pub struct Federation {
     /// Live evidence objects stored per remote publisher; further new
     /// objects are dropped.
     pub max_evidence_per_publisher: u64,
+    /// Hub mode: automatically follow back every AP-TI node that follows us,
+    /// so their evidence reaches this node.
+    pub auto_follow_back: bool,
+    /// Hub mode: cap on the TLP of peer evidence we ingest; objects more
+    /// restrictive than this are dropped. `None` ingests every shareable TLP.
+    /// Set to `clear` to ingest only TLP:CLEAR.
+    pub max_ingest_tlp: Option<Tlp>,
 }
 
 impl Default for Federation {
@@ -129,6 +136,8 @@ impl Default for Federation {
             key_fetch_rate_per_minute: 30,
             signature_max_age_secs: 12 * 3600,
             max_evidence_per_publisher: 100_000,
+            auto_follow_back: false,
+            max_ingest_tlp: None,
         }
     }
 }
@@ -225,6 +234,11 @@ pub struct Policy {
     pub recompute_interval_secs: u64,
     pub behavior: BTreeMap<Behavior, BehaviorConfig>,
     pub operator: Vec<OperatorConfig>,
+    /// Hub mode: trust every node that connects (is auto-followed back), so
+    /// its TLP:CLEAR evidence counts toward the quorum.
+    pub auto_trust_followers: bool,
+    /// Weight applied to auto-trusted connected nodes.
+    pub auto_trust_weight: f64,
 }
 
 impl Default for Policy {
@@ -241,6 +255,8 @@ impl Default for Policy {
             recompute_interval_secs: 300,
             behavior: BTreeMap::new(),
             operator: Vec::new(),
+            auto_trust_followers: false,
+            auto_trust_weight: 1.0,
         }
     }
 }
@@ -307,6 +323,9 @@ impl Config {
         }
         if !self.policy.reject_special_purpose {
             bail!("policy.reject_special_purpose must be true (Section 10)");
+        }
+        if !self.policy.auto_trust_weight.is_finite() || self.policy.auto_trust_weight < 0.0 {
+            bail!("policy.auto_trust_weight must be >= 0");
         }
         self.policy.default_k.threshold()?;
         for (b, bc) in &self.policy.behavior {

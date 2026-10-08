@@ -17,6 +17,7 @@ pub mod control;
 pub mod db;
 pub mod engine;
 pub mod httpsig;
+pub mod hub;
 pub mod inbox;
 pub mod keys;
 pub mod publish;

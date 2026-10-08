@@ -10,7 +10,7 @@ use crate::audit::Origin;
 use crate::client::{self, as_list, host_of, id_of};
 use crate::db::{self, Upsert};
 use crate::publish;
-use crate::state::AppState;
+use crate::state::{AppState, Shared};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct IngestReport {
@@ -18,6 +18,8 @@ pub struct IngestReport {
     pub ignored: usize,
     pub invalid: usize,
     pub deleted: usize,
+    /// Dropped because their TLP exceeded `federation.max_ingest_tlp`.
+    pub tlp_filtered: usize,
 }
 
 impl IngestReport {
@@ -79,6 +81,14 @@ pub async fn ingest_objects(
                 continue;
             }
         };
+        // Hub mode: cap the TLP of ingested peer evidence. `Tlp` orders from
+        // least to most restrictive, so only labels at or below the cap pass.
+        if let Some(max_tlp) = state.cfg.federation.max_ingest_tlp {
+            if o.tlp > max_tlp {
+                report.tlp_filtered += 1;
+                continue;
+            }
+        }
         // Origin rules (Section 8).
         if o.attributed_to != actor || host_of(&o.id) != actor_host {
             tracing::debug!(actor, id = %o.id, "origin mismatch");
@@ -194,7 +204,7 @@ async fn delete_ids(state: &AppState, actor: &str, ids: Vec<String>) -> anyhow::
 }
 
 /// Process a verified activity from `actor` (signature already checked).
-pub async fn process(state: &AppState, actor: &str, activity: &Value) -> anyhow::Result<()> {
+pub async fn process(state: &Shared, actor: &str, activity: &Value) -> anyhow::Result<()> {
     let kind = activity["type"].as_str().unwrap_or_default();
     let object = &activity["object"];
     let objects = as_list(object);
@@ -223,17 +233,20 @@ pub async fn process(state: &AppState, actor: &str, activity: &Value) -> anyhow:
                     .call(move |c| db::is_accepted_follower(c, &a))
                     .await?
             };
+            tracing::info!(actor, "follow request ({state_s})");
             if accepted {
                 send_follow_response(state, "Accept", actor, &follow_id).await?;
+                // Hub mode: follow the node back and trust it. A pending
+                // request is handled once an administrator approves it.
+                crate::hub::spawn_on_incoming_follow(state, actor);
             }
-            tracing::info!(actor, "follow request ({state_s})");
         }
         "Undo" => {
             // Undo{Follow}: embedded Follow, or the id of the stored Follow.
             let undone = id_of(object).map(String::from);
             let embedded_follow = object["type"] == "Follow";
             let a = actor.to_string();
-            state
+            let removed = state
                 .db
                 .call(move |c| {
                     let matches = db::get_follower(c, &a)?.is_some_and(|(fid, _)| {
@@ -242,9 +255,14 @@ pub async fn process(state: &AppState, actor: &str, activity: &Value) -> anyhow:
                     if matches {
                         db::delete_follower(c, &a)?;
                     }
-                    Ok(())
+                    Ok(matches)
                 })
                 .await?;
+            if removed {
+                // Hub mode: the node disconnected; withdraw the automatic
+                // follow-back and trust.
+                crate::hub::spawn_on_follower_gone(state, actor);
+            }
         }
         "Accept" | "Reject" => {
             let follow_id = id_of(object).map(String::from);

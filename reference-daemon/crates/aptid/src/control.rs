@@ -10,7 +10,6 @@ use apti_core::policy::PolicySet;
 use apti_core::protocol::*;
 use apti_core::{Behavior, EvidenceKind, ObservableType, Tlp};
 use chrono::Utc;
-use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -20,6 +19,7 @@ use crate::audit::Origin;
 use crate::client;
 use crate::db;
 use crate::engine;
+use crate::hub;
 use crate::inbox;
 use crate::publish;
 use crate::state::{AppState, Shared};
@@ -99,7 +99,7 @@ async fn connection(state: Shared, stream: UnixStream) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn handle(state: &AppState, req: Request, by: &Origin) -> anyhow::Result<Reply> {
+pub async fn handle(state: &Shared, req: Request, by: &Origin) -> anyhow::Result<Reply> {
     Ok(match req {
         Request::Status => Reply::Status(status(state).await?),
         Request::ListFollowing => Reply::Following(list_following(state).await?),
@@ -108,15 +108,9 @@ pub async fn handle(state: &AppState, req: Request, by: &Origin) -> anyhow::Resu
             Reply::Done
         }
         Request::Unfollow { actor } => {
-            let a = actor.clone();
-            let row = state.db.call(move |c| db::delete_following(c, &a)).await?;
-            let row = row.ok_or_else(|| anyhow!("not following {actor}"))?;
-            let undo = json!({
-                "type": "Undo",
-                "id": state.urls.new_activity_id(),
-                "object": {"type": "Follow", "id": row.follow_id, "actor": state.urls.actor, "object": actor},
-            });
-            publish::send_direct(state, undo, &actor).await?;
+            if !publish::unfollow_actor(state, &actor).await? {
+                bail!("not following {actor}");
+            }
             Reply::Done
         }
         Request::Resync { actor } => {
@@ -143,6 +137,8 @@ pub async fn handle(state: &AppState, req: Request, by: &Origin) -> anyhow::Resu
                 .call(move |c| db::set_follower_state(c, &a, "accepted"))
                 .await?;
             inbox::send_follow_response(state, "Accept", &actor, &follow_id).await?;
+            // Hub mode: an approved node is followed back and trusted.
+            hub::spawn_on_incoming_follow(state, &actor);
             Reply::Done
         }
         Request::RejectFollower { actor } => {
@@ -155,6 +151,8 @@ pub async fn handle(state: &AppState, req: Request, by: &Origin) -> anyhow::Resu
             let a = actor.clone();
             state.db.call(move |c| db::delete_follower(c, &a)).await?;
             inbox::send_follow_response(state, "Reject", &actor, &follow_id).await?;
+            // Hub mode: withdraw an automatic follow-back and trust.
+            hub::spawn_on_follower_gone(state, &actor);
             Reply::Done
         }
         Request::ListOperators => Reply::Operators(list_operators(state).await?),
@@ -414,20 +412,7 @@ async fn follow(state: &AppState, handle: &str) -> anyhow::Result<()> {
         )
     };
     let actor = client::fetch_actor(state, &actor_url, true).await?;
-    let follow_id = state.urls.new_activity_id();
-    let (a, f) = (actor.id.clone(), follow_id.clone());
-    state
-        .db
-        .call(move |c| db::upsert_following(c, &a, handle_opt.as_deref(), &f, "pending"))
-        .await?;
-    let activity = json!({
-        "type": "Follow",
-        "id": follow_id,
-        "object": actor.id,
-    });
-    publish::send_direct(state, activity, &actor.id).await?;
-    // Consumers MUST read activeObjects on first follow (Section 5.3).
-    state.sync_now.notify_one();
+    publish::follow_actor(state, &actor, handle_opt.as_deref()).await?;
     Ok(())
 }
 

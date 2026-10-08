@@ -37,6 +37,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/observations", post(push))
         .route("/api/v1/active", get(active))
         .route("/api/v1/timeline", get(timeline))
+        .route("/api/v1/nodes", get(nodes))
         .route("/api/v1/allowlist", get(allowlist_list).post(allowlist_add))
         .route(
             "/api/v1/allowlist/{id}",
@@ -352,6 +353,71 @@ async fn active(
         entries,
     })
     .into_response()
+}
+
+// -------------------------------------------------------------------- nodes
+
+/// One connected node (an actor this node follows), for a hub's public
+/// directory.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeInfo {
+    pub actor: String,
+    /// WebFinger handle `user@host`, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The actor's `summary`; aptid puts its removal-request contact here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    pub evidence: u64,
+    /// `pending`, `accepted` or `rejected`.
+    pub state: String,
+}
+
+/// Connected nodes (the actors we follow). On a hub these are the nodes that
+/// have connected, so this is the public node directory.
+async fn nodes(State(state): State<Shared>, headers: HeaderMap) -> Response {
+    if let Err(r) = authorise(&state, &headers, ApiScope::Read).await {
+        return r;
+    }
+    let nodes = match state
+        .db
+        .call(|c| {
+            let map = db::actor_operator_map(c)?;
+            db::list_following(c)?
+                .into_iter()
+                .map(|f| {
+                    let remote = db::get_remote_actor(c, &f.actor)?;
+                    let (name, summary) = remote
+                        .as_ref()
+                        .map(|a| (a.name.clone(), a.summary.clone()))
+                        .unwrap_or_default();
+                    let handle = remote
+                        .as_ref()
+                        .and_then(|a| actor_handle(a.preferred_username.as_deref(), &f.actor))
+                        .or_else(|| f.handle.clone().filter(|h| h.contains('@')));
+                    Ok(NodeInfo {
+                        actor: f.actor.clone(),
+                        handle,
+                        name,
+                        summary,
+                        operator: map.get(&f.actor).map(|(o, _)| o.clone()),
+                        evidence: db::count_evidence_by_publisher(c, &f.actor)?,
+                        state: f.state,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
+    };
+    Json(nodes).into_response()
 }
 
 // ----------------------------------------------------------------- timeline

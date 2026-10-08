@@ -1,0 +1,22 @@
+# apti-statsd configuration for the docker hub setup.
+#
+# Points at the aptid service in the same compose file. Use a `read` token
+# whose max_tlp is "clear": only TLP:CLEAR entries are fetched. Only
+# aggregates and the node directory are served, never individual observables.
+# Create it with: docker compose exec aptid apti-tui --socket /run/aptid/control.sock
+
+[aptid]
+url = "http://aptid:8081"
+read_token = "apti_REPLACE_ME"
+timeout_secs = 30
+
+[poll]
+interval_secs = 60
+window_days = 30
+
+[server]
+# The page and the node directory are rendered into this directory after
+# every poll; Caddy serves it from the same volume. apti-statsd itself
+# listens on nothing, so it has no public attack surface.
+output_dir = "/var/lib/apti-statsd/public"
+title = "AP-TI public statistics"

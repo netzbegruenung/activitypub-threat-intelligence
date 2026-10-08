@@ -1,0 +1,70 @@
+# aptid configuration for a public hub (docker hub setup).
+#
+# Hub mode: follow back every node that connects, ingest only TLP:CLEAR, and
+# trust connected nodes so their CLEAR evidence counts toward the quorum. The
+# hub runs no sensors and publishes nothing of its own; its value is the
+# aggregate active list, republished by apti-statsd.
+#
+# Policy edited at runtime with apti-tui is stored in the database and takes
+# precedence over the values below. REST API tokens are managed only in
+# apti-tui: create a `read` token with max_tlp "clear" for apti-statsd.
+
+[instance]
+base_url = "https://ti.example.net"
+username = "feed"
+name = "Public AP-TI hub"
+organization = "Public AP-TI hub"
+contact = "abuse@example.net"
+
+[storage]
+database = "/var/lib/aptid/aptid.sqlite"
+key_file = "/var/lib/aptid/actor.pem"
+
+[public]
+bind = "0.0.0.0:8080"
+max_body_bytes = 4194304
+
+[api]
+# Internal REST API. Reachable from apti-statsd in this compose file only.
+bind = "0.0.0.0:8081"
+
+[control]
+socket = "/run/aptid/control.sock"
+mode = "0660"
+allowed_uids = []
+allowed_gids = []
+
+[federation]
+allow_http = false
+allow_private_addresses = false
+sync_interval_secs = 900
+full_resync_interval_secs = 604800
+# --- Hub mode -------------------------------------------------------------
+# Follow back every AP-TI node that follows this one (no manual peer mgmt).
+auto_follow_back = true
+# Ingest only TLP:CLEAR peer evidence; drop more restrictive objects.
+max_ingest_tlp = "clear"
+
+[publish]
+batch_interval_secs = 300
+# Auto-approve incoming followers, so connected nodes' evidence flows in.
+manually_approves_followers = false
+tombstone_days = 180
+
+[policy]
+# An observable is active when corroborated by at least two connected nodes
+# (auto_trust_weight 1 each); the hub's own sensors are off (it publishes
+# nothing), so local_weight is irrelevant.
+default_k = 2
+local_weight = 2
+min_v4_prefix = 24
+min_v6_prefix = 48
+reject_special_purpose = true
+allow_documentation_ranges = false
+retention_days = 30
+recompute_interval_secs = 300
+# --- Hub mode -------------------------------------------------------------
+# Trust every connected node at this weight so its TLP:CLEAR evidence counts
+# toward the quorum k.
+auto_trust_followers = true
+auto_trust_weight = 1

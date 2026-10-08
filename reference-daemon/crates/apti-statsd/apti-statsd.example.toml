@@ -1,0 +1,46 @@
+# apti-statsd: public statistics page for an AP-TI hub.
+#
+# It polls the hub's internal REST API and publishes aggregates over its
+# TLP:CLEAR dataset: a self-contained statistics page (no individual IPs,
+# prefixes or domains, per Section 11) and a JSON directory of the hub's
+# connected nodes. Individual observables are never served.
+#
+# Create the [aptid] token in the hub's aptid with scope `read` and
+# `max_tlp = "clear"`, so only TLP:CLEAR entries are ever fetched:
+#
+#   aptid token add --name stats --scope read --max-tlp clear
+
+[aptid]
+# Base URL of the hub's internal REST API.
+url = "http://127.0.0.1:8081"
+read_token = "apti_REPLACE_ME"
+timeout_secs = 30
+
+[poll]
+# How often the hub is polled.
+interval_secs = 60
+# Length of the findings window shown on the page.
+window_days = 30
+
+[server]
+title = "AP-TI public statistics"
+
+# By default apti-statsd listens on nothing: after every poll it renders
+# index.html and nodes.json into this directory, which nginx, Apache or Caddy
+# serves. Files are replaced atomically, so a request never reads a partial
+# page. This is the recommended setup: no socket of apti-statsd is exposed.
+output_dir = "/var/lib/apti-statsd/public"
+
+# Alternatively apti-statsd can serve the page itself. Uncomment `bind` to
+# use that instead of output_dir, and put it behind a TLS-terminating reverse
+# proxy. The settings below then apply.
+#
+# bind = "0.0.0.0:8082"
+#
+# Per-client request rate limit (requests per minute).
+# rate_limit_per_min = 120
+#
+# Rate-limit by the last X-Forwarded-For entry instead of the peer address.
+# Enable only if every request comes through a reverse proxy that sets or
+# appends that header; otherwise clients can choose their own address.
+# trust_forwarded_for = false
