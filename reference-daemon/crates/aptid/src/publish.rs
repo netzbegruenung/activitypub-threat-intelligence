@@ -152,6 +152,47 @@ pub async fn send_direct(state: &AppState, mut activity: Value, to: &str) -> any
     .await
 }
 
+/// Record a follow of an already-fetched actor and send the `Follow`
+/// activity. Consumers MUST read `activeObjects` on first follow (Section
+/// 5.3), so the sync task is woken.
+pub async fn follow_actor(
+    state: &AppState,
+    actor: &db::RemoteActor,
+    handle: Option<&str>,
+) -> anyhow::Result<()> {
+    let follow_id = state.urls.new_activity_id();
+    let handle = handle.map(str::to_string);
+    let (a, f) = (actor.id.clone(), follow_id.clone());
+    state
+        .db
+        .call(move |c| db::upsert_following(c, &a, handle.as_deref(), &f, "pending"))
+        .await?;
+    let activity = json!({
+        "type": "Follow",
+        "id": follow_id,
+        "object": actor.id,
+    });
+    send_direct(state, activity, &actor.id).await?;
+    state.sync_now.notify_one();
+    Ok(())
+}
+
+/// Stop following `actor`: drop the follow and send `Undo{Follow}`.
+/// Returns `false` if we did not follow it.
+pub async fn unfollow_actor(state: &AppState, actor: &str) -> anyhow::Result<bool> {
+    let a = actor.to_string();
+    let Some(row) = state.db.call(move |c| db::delete_following(c, &a)).await? else {
+        return Ok(false);
+    };
+    let undo = json!({
+        "type": "Undo",
+        "id": state.urls.new_activity_id(),
+        "object": {"type": "Follow", "id": row.follow_id, "actor": state.urls.actor, "object": actor},
+    });
+    send_direct(state, undo, actor).await?;
+    Ok(true)
+}
+
 /// Build a local Sighting from an observation, reusing the existing object.
 fn sighting_from(
     state: &AppState,

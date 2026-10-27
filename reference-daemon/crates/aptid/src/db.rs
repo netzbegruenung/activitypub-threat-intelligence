@@ -216,6 +216,13 @@ ALTER TABLE observations ADD COLUMN tlp TEXT;
 ALTER TABLE remote_actors ADD COLUMN name TEXT;
 ALTER TABLE remote_actors ADD COLUMN summary TEXT;
 "#,
+    r#"
+-- Hub mode: follows and operator trust created automatically for a
+-- connecting node, so they can be withdrawn again when it disconnects.
+-- Anything set by an administrator has auto = 0 and is never touched.
+ALTER TABLE following ADD COLUMN auto INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE operator_policy ADD COLUMN auto INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 #[derive(Clone)]
@@ -476,10 +483,37 @@ pub fn set_operator_policy(
 ) -> anyhow::Result<()> {
     c.execute(
         "INSERT INTO operator_policy (operator, behavior, trusted, weight) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(operator, behavior) DO UPDATE SET trusted = excluded.trusted, weight = excluded.weight",
+         ON CONFLICT(operator, behavior) DO UPDATE SET trusted = excluded.trusted,
+             weight = excluded.weight, auto = 0",
         params![operator, behavior_key(behavior), p.trusted as i64, p.weight],
     )?;
     Ok(())
+}
+
+/// Hub mode: add an operator-wide policy marked as automatic, unless the
+/// operator already has any policy (set by an administrator or earlier
+/// automatically). Returns whether a row was inserted.
+pub fn insert_auto_operator_policy(
+    c: &Connection,
+    operator: &str,
+    p: OperatorPolicy,
+) -> anyhow::Result<bool> {
+    let n = c.execute(
+        "INSERT INTO operator_policy (operator, behavior, trusted, weight, auto)
+         SELECT ?1, '*', ?2, ?3, 1
+         WHERE NOT EXISTS (SELECT 1 FROM operator_policy WHERE operator = ?1)",
+        params![operator, p.trusted as i64, p.weight],
+    )?;
+    Ok(n > 0)
+}
+
+/// Hub mode: remove the automatic policy of `operator`, if any. Policies set
+/// by an administrator are kept.
+pub fn delete_auto_operator_policy(c: &Connection, operator: &str) -> anyhow::Result<bool> {
+    Ok(c.execute(
+        "DELETE FROM operator_policy WHERE operator = ?1 AND auto = 1",
+        [operator],
+    )? > 0)
 }
 
 pub fn clear_operator_policy(
@@ -574,7 +608,7 @@ pub fn upsert_following(
     c.execute(
         "INSERT INTO following (actor, handle, state, follow_id, created) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(actor) DO UPDATE SET handle = COALESCE(excluded.handle, handle),
-             state = excluded.state, follow_id = excluded.follow_id",
+             state = excluded.state, follow_id = excluded.follow_id, auto = 0",
         params![actor, handle, state, follow_id, ts(Utc::now())],
     )?;
     Ok(())
@@ -634,6 +668,32 @@ pub fn is_following(c: &Connection, actor: &str) -> anyhow::Result<bool> {
         .optional()?
         .is_some(),
     )
+}
+
+/// Hub mode: mark our follow of `actor` as created automatically.
+pub fn set_following_auto(c: &Connection, actor: &str) -> anyhow::Result<()> {
+    c.execute("UPDATE following SET auto = 1 WHERE actor = ?1", [actor])?;
+    Ok(())
+}
+
+/// Hub mode: whether our follow of `actor` was created automatically.
+pub fn is_following_auto(c: &Connection, actor: &str) -> anyhow::Result<bool> {
+    Ok(c.query_row(
+        "SELECT auto FROM following WHERE actor = ?1",
+        [actor],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()?
+    .is_some_and(|a| a != 0))
+}
+
+/// Hub mode: actors we follow automatically.
+pub fn list_auto_following(c: &Connection) -> anyhow::Result<Vec<String>> {
+    let mut stmt = c.prepare("SELECT actor FROM following WHERE auto = 1")?;
+    let rows = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
 }
 
 pub fn record_sync(

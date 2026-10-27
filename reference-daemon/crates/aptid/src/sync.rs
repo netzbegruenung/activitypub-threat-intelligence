@@ -99,6 +99,7 @@ pub async fn sync_actor(state: &AppState, row: &FollowingRow) -> anyhow::Result<
         report.ignored += r.ignored;
         report.invalid += r.invalid;
         report.deleted += r.deleted;
+        report.tlp_filtered += r.tlp_filtered;
         if stop {
             break 'pages;
         }

@@ -50,6 +50,42 @@ binary is linked against glibc.
 - **Host with legacy iptables:** set `banaction = iptables-multiport` in
   `00-defaults.local`.
 
+## Public hub (apti-statsd)
+
+`compose.hub.example.yaml` runs a public hub: `aptid` in hub mode (follows
+back every node that connects, ingests only TLP:CLEAR, and trusts connected
+nodes) and `apti-statsd`, which publishes an aggregate statistics page over
+the hub's TLP:CLEAR dataset and a JSON directory of connected nodes, behind
+Caddy for TLS.
+
+```sh
+cd docker
+cp .env.example .env
+cp config/aptid-hub.example.toml config/aptid-hub.toml      # set [instance]
+cp config/apti-statsd.example.toml config/apti-statsd.toml
+cp Caddyfile.hub.example Caddyfile.hub                       # set hosts
+docker compose -f compose.hub.example.yaml build
+docker compose -f compose.hub.example.yaml up -d
+```
+
+Then create a `read` token with `max_tlp = "clear"` for apti-statsd and put
+its secret in `config/apti-statsd.toml`:
+
+```sh
+docker compose -f compose.hub.example.yaml exec aptid apti-tui --socket /run/aptid/control.sock
+```
+
+- `ti.example.net` serves the hub's ActivityPub endpoints; other AP-TI nodes
+  connect by following `feed@ti.example.net`.
+- `stats.example.net` serves the public statistics page (`/`) and the
+  connected-node directory (`/nodes.json`). Individual observables are not
+  published.
+- apti-statsd renders both into the `statsd-public` volume after every poll
+  and Caddy serves that volume read-only; apti-statsd itself publishes no
+  port and is not reachable from the network.
+- The internal API (`8081`) is reached by apti-statsd over the compose
+  network; keep it off the public internet.
+
 ## Parsing other containers' logs
 
 `compose.landscape.example.yaml` shows how to mount the log volumes of other

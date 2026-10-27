@@ -144,6 +144,7 @@ The [`reference-daemon`](reference-daemon/) Cargo workspace contains:
 | `apti-allowlist` | Connector: keeps the local allowlist in sync with a hand-edited text file (append or source-of-truth mode). |
 | `apti-rspamd` | Connector: reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to `aptid` (with a separate TLP for each), and serves the active list to Rspamd as multimap files (IPs, URL and sender domains). |
 | `apti-dashboard` | Tool: renders a static HTML world map of where findings come from (GeoIP), with a time slider and filters for behaviour and own vs. federated evidence. |
+| `apti-statsd` | Connector: publishes aggregate statistics over a hub's TLP:CLEAR dataset — a statistics page (no individual observables) and a JSON directory of the hub's connected nodes. |
 
 A typical deployment works like this:
 

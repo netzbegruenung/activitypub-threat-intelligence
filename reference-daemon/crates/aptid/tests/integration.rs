@@ -1324,3 +1324,393 @@ async fn rest_timeline() {
     assert_eq!(t["entries"].as_array().unwrap().len(), 3, "{t}");
     d.shutdown();
 }
+
+// ------------------------------------------------------------------ hub mode
+
+/// A hub: auto-approves and follows back, ingests only TLP:CLEAR, and
+/// auto-trusts connected nodes.
+async fn spawn_hub(dir: &Path, name: &str) -> Daemon {
+    spawn_hub_with(dir, name, false).await
+}
+
+async fn spawn_hub_with(dir: &Path, name: &str, manual: bool) -> Daemon {
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = public.local_addr().unwrap().port();
+    let d = dir.join(name);
+    let cfg = format!(
+        r#"
+[instance]
+base_url = "http://127.0.0.1:{port}"
+organization = "Hub {name}"
+[storage]
+database = "{db}"
+key_file = "{key}"
+[public]
+bind = "127.0.0.1:0"
+[api]
+bind = "127.0.0.1:0"
+[control]
+socket = "{sock}"
+[federation]
+allow_http = true
+allow_private_addresses = true
+sync_interval_secs = 3600
+auto_follow_back = true
+max_ingest_tlp = "clear"
+[publish]
+manually_approves_followers = {manual}
+batch_interval_secs = 3600
+[policy]
+recompute_interval_secs = 3600
+auto_trust_followers = true
+auto_trust_weight = 1
+allowlist = ["8.8.8.8"]
+"#,
+        db = d.join("db.sqlite").display(),
+        key = d.join("key.pem").display(),
+        sock = d.join("control.sock").display(),
+    );
+    let cfg = Config::parse(&cfg).unwrap();
+    let d = aptid::start_with_listeners(cfg, public, api).await.unwrap();
+    add_token(&d, "read", READ, &[ApiScope::Read], Tlp::Amber).await;
+    d
+}
+
+/// A participant node that auto-approves, so the hub's follow-back is
+/// accepted and its CLEAR evidence is delivered to the hub.
+async fn spawn_open_node(dir: &Path, name: &str) -> Daemon {
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = public.local_addr().unwrap().port();
+    let d = dir.join(name);
+    let cfg = format!(
+        r#"
+[instance]
+base_url = "http://127.0.0.1:{port}"
+organization = "Node {name}"
+[storage]
+database = "{db}"
+key_file = "{key}"
+[public]
+bind = "127.0.0.1:0"
+[api]
+bind = "127.0.0.1:0"
+[control]
+socket = "{sock}"
+[federation]
+allow_http = true
+allow_private_addresses = true
+sync_interval_secs = 3600
+[publish]
+manually_approves_followers = false
+batch_interval_secs = 3600
+[policy]
+recompute_interval_secs = 3600
+allowlist = ["8.8.8.8"]
+"#,
+        db = d.join("db.sqlite").display(),
+        key = d.join("key.pem").display(),
+        sock = d.join("control.sock").display(),
+    );
+    let cfg = Config::parse(&cfg).unwrap();
+    let d = aptid::start_with_listeners(cfg, public, api).await.unwrap();
+    add_token(&d, "push", PUSH, &[ApiScope::Push], Tlp::Green).await;
+    d
+}
+
+async fn api_nodes(d: &Daemon, token: &str) -> Vec<Value> {
+    let r: Value = reqwest::Client::new()
+        .get(format!("http://{}/api/v1/nodes", d.api_addr))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    r.as_array().cloned().unwrap_or_default()
+}
+
+/// Hub mode: a node follows the hub, the hub follows back and trusts it,
+/// ingests only TLP:CLEAR, and requires corroboration (k=2) to activate.
+#[tokio::test]
+async fn hub_mode() {
+    const CORROBORATED: &str = "45.13.7.9";
+    const GREEN_ONLY: &str = "45.13.7.10";
+    let dir = tempfile::tempdir().unwrap();
+    let h = spawn_hub(dir.path(), "hub").await;
+    let n1 = spawn_open_node(dir.path(), "n1").await;
+    let n1_actor = n1.state.urls.actor.clone();
+
+    // N1 follows the hub; the hub auto-approves and follows N1 back.
+    ctl_ok(
+        &n1,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("hub follows n1 back", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().any(|f| f.actor == n1_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+
+    // N1 reports CORROBORATED as TLP:CLEAR. The hub ingests it and trusts N1.
+    push(
+        &n1,
+        PUSH,
+        json!({"value": CORROBORATED, "behavior": "ssh-bruteforce", "tlp": "clear"}),
+    )
+    .await;
+    publish::run_batch(&n1.state).await.unwrap();
+    wait_for("hub ingested n1 sighting", || async {
+        match ctl(
+            &h,
+            Request::Lookup {
+                value: CORROBORATED.into(),
+            },
+        )
+        .await
+        {
+            Reply::Lookup(l) => (!l.evidence.is_empty()).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    // A single node (weight 1) is below k=2: not active.
+    ctl_ok(&h, Request::Recompute).await;
+    assert!(
+        active(&h, READ)
+            .await
+            .iter()
+            .all(|e| e["observableValue"] != CORROBORATED),
+        "a single node must not activate an observable alone"
+    );
+
+    // A second node corroborates the same observable: now active.
+    let n2 = spawn_open_node(dir.path(), "n2").await;
+    let n2_actor = n2.state.urls.actor.clone();
+    ctl_ok(
+        &n2,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("hub follows n2 back", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().any(|f| f.actor == n2_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    push(
+        &n2,
+        PUSH,
+        json!({"value": CORROBORATED, "behavior": "ssh-bruteforce", "tlp": "clear"}),
+    )
+    .await;
+    publish::run_batch(&n2.state).await.unwrap();
+    wait_for("hub holds corroborating evidence", || async {
+        match ctl(
+            &h,
+            Request::Lookup {
+                value: CORROBORATED.into(),
+            },
+        )
+        .await
+        {
+            Reply::Lookup(l) => {
+                let n1 = l.evidence.iter().any(|e| e.publisher == n1_actor);
+                let n2 = l.evidence.iter().any(|e| e.publisher == n2_actor);
+                (n1 && n2).then_some(())
+            }
+            _ => None,
+        }
+    })
+    .await;
+    ctl_ok(&h, Request::Recompute).await;
+    assert!(
+        active(&h, READ)
+            .await
+            .iter()
+            .any(|e| e["observableValue"] == CORROBORATED),
+        "corroborated observable must be active"
+    );
+
+    // The hub ingests only TLP:CLEAR: N1's GREEN report is dropped. Force the
+    // hub to pull N1's activeObjects (which now carries the GREEN Sighting).
+    push(
+        &n1,
+        PUSH,
+        json!({"value": GREEN_ONLY, "behavior": "ssh-bruteforce", "tlp": "green"}),
+    )
+    .await;
+    publish::run_batch(&n1.state).await.unwrap();
+    aptid::sync::sync_due(&h.state).await.unwrap();
+    let Reply::Lookup(l) = ctl(
+        &h,
+        Request::Lookup {
+            value: GREEN_ONLY.into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(
+        l.evidence.is_empty(),
+        "TLP:GREEN evidence must not be ingested"
+    );
+
+    // The connected-node directory lists the connected nodes.
+    let nodes = api_nodes(&h, READ).await;
+    assert!(nodes.iter().any(|n| n["actor"] == n1_actor), "{nodes:?}");
+    assert!(nodes.iter().any(|n| n["actor"] == n2_actor), "{nodes:?}");
+
+    // An administrator's policy is never overwritten by auto-trust: N3's
+    // operator is distrusted before N3 connects, and stays distrusted.
+    let n3 = spawn_open_node(dir.path(), "n3").await;
+    let n3_actor = n3.state.urls.actor.clone();
+    let n3_org = n3.state.urls.org.clone();
+    ctl_ok(
+        &h,
+        Request::SetOperatorPolicy {
+            operator: n3_org.clone(),
+            behavior: None,
+            policy: OperatorPolicy {
+                trusted: false,
+                weight: 0.0,
+            },
+        },
+    )
+    .await;
+    ctl_ok(
+        &n3,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("hub follows n3 back", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().any(|f| f.actor == n3_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+
+    // N2 disconnects: the hub undoes its follow-back and withdraws the
+    // auto-trust, so the observable falls below the quorum again.
+    let n2_org = n2.state.urls.org.clone();
+    assert!(operator_policy(&h, &n2_org)
+        .await
+        .is_some_and(|p| p.trusted));
+    ctl_ok(
+        &n2,
+        Request::Unfollow {
+            actor: h.state.urls.actor.clone(),
+        },
+    )
+    .await;
+    wait_for("hub unfollows n2", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().all(|f| f.actor != n2_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    wait_for("hub withdraws n2's auto-trust", || async {
+        operator_policy(&h, &n2_org).await.is_none().then_some(())
+    })
+    .await;
+    ctl_ok(&h, Request::Recompute).await;
+    assert!(
+        active(&h, READ)
+            .await
+            .iter()
+            .all(|e| e["observableValue"] != CORROBORATED),
+        "a disconnected node's evidence must no longer count"
+    );
+    // By now N3's follow-back task has long finished.
+    assert_eq!(
+        operator_policy(&h, &n3_org).await,
+        Some(OperatorPolicy {
+            trusted: false,
+            weight: 0.0
+        }),
+        "auto-trust must not overwrite an administrator's policy"
+    );
+    h.shutdown();
+    n1.shutdown();
+    n2.shutdown();
+    n3.shutdown();
+}
+
+/// The operator-wide policy the hub holds for `operator`, if any.
+async fn operator_policy(d: &Daemon, operator: &str) -> Option<OperatorPolicy> {
+    match ctl(d, Request::ListOperators).await {
+        Reply::Operators(ops) => ops
+            .into_iter()
+            .find(|o| o.id == operator)
+            .and_then(|o| o.default_policy),
+        r => panic!("{r:?}"),
+    }
+}
+
+/// Hub mode with manual approval: a pending follower is neither followed
+/// back nor trusted until an administrator approves it.
+#[tokio::test]
+async fn hub_mode_manual_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = spawn_hub_with(dir.path(), "hub", true).await;
+    let n = spawn_open_node(dir.path(), "n").await;
+    let n_actor = n.state.urls.actor.clone();
+    ctl_ok(
+        &n,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("follow request pending at the hub", || async {
+        match ctl(&h, Request::ListFollowers).await {
+            Reply::Followers(f) => f.iter().any(|f| f.actor == n_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    let Reply::Following(f) = ctl(&h, Request::ListFollowing).await else {
+        panic!()
+    };
+    assert!(f.is_empty(), "pending follower must not be followed back");
+    assert_eq!(operator_policy(&h, &n.state.urls.org).await, None);
+
+    ctl_ok(
+        &h,
+        Request::ApproveFollower {
+            actor: n_actor.clone(),
+        },
+    )
+    .await;
+    wait_for("hub follows n back after approval", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().any(|f| f.actor == n_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    wait_for("hub trusts n after approval", || async {
+        operator_policy(&h, &n.state.urls.org)
+            .await
+            .is_some_and(|p| p.trusted)
+            .then_some(())
+    })
+    .await;
+    h.shutdown();
+    n.shutdown();
+}

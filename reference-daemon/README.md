@@ -14,6 +14,7 @@ It follows the deployment model of Appendix D. The workspace contains these crat
 | `apti-allowlist` | connector | Keeps aptid's local allowlist in sync with a text file (bulk import). |
 | `apti-rspamd` | connector | Reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to aptid, and serves aptid's active list to Rspamd as multimap files. |
 | `apti-dashboard` | tool | Renders a static HTML world map of findings per country (GeoIP), with a time slider and behaviour/origin filters. |
+| `apti-statsd` | connector | Publishes aggregate statistics over a hub's TLP:CLEAR dataset: a statistics page (no individual observables) and a JSON directory of the hub's connected nodes. |
 
 ## Build and run
 
@@ -219,6 +220,24 @@ enforced: trust, quorum and expiry play no part.
 - **Filters:** `type`, `behavior`.
 - **TLP and allowlist:** entries above the token's `max_tlp` and locally
   allowlisted values are left out, as on the active list.
+
+### Connected nodes (scope `read`)
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" https://ti-internal:8081/api/v1/nodes
+```
+
+```json
+[{"actor": "https://peer.example.org/actor", "handle": "feed@peer.example.org",
+  "name": "Peer Org", "summary": "abuse@peer.example.org",
+  "operator": "https://peer.example.org/org", "evidence": 41, "state": "accepted"}]
+```
+
+The actors this node follows, one entry each, with the display `handle` and
+`name` (cached actor document), the resolved `operator`, how much `evidence`
+that actor has published, and the follow `state` (`pending`, `accepted` or
+`rejected`). On a [hub](#hub-mode) these are the connected nodes, so this is
+the public node directory that `apti-statsd` republishes.
 
 ### Manage the allowlist
 
@@ -629,6 +648,140 @@ sends DNS queries for domains listed as malicious, whose name servers may be
 run by the attacker, from the host running the dashboard. A domain is
 counted once in each country its addresses are in.
 
+## Hub mode
+
+A single aptid can act as a **hub**: a node that any other AP-TI node can
+connect to with no manual peer management, that ingests only TLP:CLEAR
+evidence, and whose aggregate statistics are published through
+`apti-statsd`.
+
+A participant connects by following the hub's actor (`feed@<hub host>`). Once
+the follow is accepted (immediately with `manually_approves_followers =
+false`, otherwise when an administrator approves it), the hub:
+
+1. **follows it back** (`[federation] auto_follow_back = true`), so the
+   participant's evidence reaches the hub over the usual inbox delivery and
+   pull sync;
+2. **ingests only TLP:CLEAR** (`[federation] max_ingest_tlp = "clear"`); more
+   restrictive objects are dropped (counted as `tlpFiltered`);
+3. **trusts the connected node's operator** (`[policy] auto_trust_followers =
+   true`, at weight `auto_trust_weight`, default 1), so its CLEAR evidence
+   counts toward the quorum `k`. An operator that already has a policy, set
+   in `[[policy.operator]]` or with the TUI, keeps it: auto-trust never
+   overrides an administrator's decision.
+
+When the node disconnects (it sends `Undo{Follow}`, or an administrator
+rejects its follow), the hub undoes its automatic follow-back and removes the
+automatic trust of the node's operator once no other automatically followed
+node of that operator remains. Follows and policies set by an administrator
+are left alone. Evidence already received stays stored until it expires, but
+no longer counts once its operator is untrusted.
+
+With the default `k = 2` and `auto_trust_weight = 1`, an observable becomes
+active only when nodes of **two** distinct operators report it
+(corroboration). The hub publishes nothing of its own (it runs no sensors);
+its value is the aggregate active list. Because it ingests and trusts only
+TLP:CLEAR, its active list and timeline contain TLP:CLEAR entries only. See
+[`config.example.toml`](config.example.toml) for the hub options and
+[apti-statsd](#apti-statsd) for the public page.
+
+> **Trust model:** the quorum sums weight per *operator*, so two nodes of one
+> operator count once. But operators are self-declared: an operator is a
+> verified `operator` Organization document, or else the node's registrable
+> domain. Anyone who controls a domain can publish several Organization
+> documents or use several domains, and so present as several operators.
+> A single party can therefore meet `k = 2` and list an observable on its own.
+> Treat the hub's active list as "reported by feeds of at least `k`
+> self-declared operators", not as a verdict.
+
+## apti-statsd
+
+`apti-statsd` publishes aggregate statistics over a hub's TLP:CLEAR dataset.
+It polls the hub's internal REST API (`GET /api/v1/active`,
+`/api/v1/timeline`, `/api/v1/nodes`) every `poll.interval_secs` with a `read`
+token whose `max_tlp = "clear"`, reduces the active list and timeline to
+counts, and publishes:
+
+| File / path | Content |
+|---|---|
+| `index.html`, `GET /` | A self-contained aggregate statistics page: connected-node count, evidence ingested, and active-observable and finding counts and distributions, by observable type and behaviour. **No individual IP, prefix or domain is shown** (personal data even at TLP:CLEAR, Sec. 11). |
+| `nodes.json`, `GET /api/v1/nodes` | The hub's connected nodes, as JSON (see [Connected nodes](#connected-nodes-scope-read)). Only nodes whose follow is `accepted` are published. |
+| `GET /health` | `{"status":"ok"}`. Server mode only. |
+
+| Subcommand | Effect |
+|---|---|
+| `run` | Polls the hub and publishes the page and node directory. |
+| `summary` | Fetches the hub once and prints the aggregate statistics. |
+| `check` | Validates the config. |
+
+```sh
+cp crates/apti-statsd/apti-statsd.example.toml /etc/apti-statsd/config.toml
+apti-statsd -c /etc/apti-statsd/config.toml check
+apti-statsd -c /etc/apti-statsd/config.toml summary
+apti-statsd -c /etc/apti-statsd/config.toml run
+```
+
+- **TLP and personal data:** the hub ingests only TLP:CLEAR and the poller's
+  token is capped at `max_tlp = "clear"`, so only TLP:CLEAR entries are ever
+  fetched. Individual IPs, prefixes and domains are personal data even at
+  TLP:CLEAR (Sec. 11), so they are never served: the active list and timeline
+  are not republished, and the page shows counts and distributions only.
+### Static output (default)
+
+By default `apti-statsd` opens no listening socket. The page is a static
+document (inline CSS, no JavaScript, no external resources), so after every
+poll it writes `index.html` and `nodes.json` into `server.output_dir`
+(default `/var/lib/apti-statsd/public`) and nginx, Apache or Caddy serves
+that directory. Each file is written under a temporary name and renamed into
+place, so a request never reads a half-written page. Nothing of
+`apti-statsd` is reachable from the network, and caching, compression and
+rate limiting are the web server's.
+
+Point the web server's document root at that directory and let it revalidate
+on every request, since the files are rewritten each `poll.interval_secs`:
+
+```nginx
+server {
+    server_name stats.example.net;
+    root /var/lib/apti-statsd/public;
+    add_header Cache-Control "no-cache" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+}
+```
+
+### Server mode
+
+Setting `server.bind` makes `apti-statsd` serve the page itself instead,
+behind a TLS-terminating reverse proxy on its own host or subdomain (e.g.
+`stats.example.net`). In that mode:
+
+- **Caching:** responses carry `ETag`, `Last-Modified` and `Expires`;
+  unchanged bodies are answered with `304`.
+- **Rate limiting:** requests are limited per client
+  (`server.rate_limit_per_min`, default 120/min, fixed one-minute window);
+  excess gets `429`. A client is an IPv4 address or an IPv6 /64. By default
+  the client is the peer socket address. Behind a reverse proxy set
+  `server.trust_forwarded_for = true`: the client is then the **last**
+  `X-Forwarded-For` entry, which the proxy sets or appends (Caddy, nginx
+  `proxy_add_x_forwarded_for`). Earlier entries come from the client and are
+  ignored. Enable it only if `apti-statsd` is reachable through the proxy
+  alone, or clients can pick their own address. At most 65,536 clients are
+  tracked; when the table is full the oldest windows are evicted, so the
+  table stays bounded without locking out clients that have not been seen.
+- **Startup:** before the first successful fetch the page and node directory
+  return `503`.
+
+### Outages
+
+If the hub is unreachable the last fetched snapshot keeps being published,
+and the page shows a "hub unreachable" notice once the snapshot is older than
+twice the poll interval. In static output mode the files are rewritten on
+every poll attempt, so that notice appears without a successful fetch; before
+the first successful fetch nothing is written, leaving an earlier run's
+output in place.
+
 ## ActivityPub endpoints
 
 | Path | Description |
@@ -688,6 +841,7 @@ show the position of the selected row; with a filter active it reads
 | 9 Aggregation, 11 retention | `aptid/src/engine.rs`, `aptid/src/api.rs` |
 | Appendix D control socket | `aptid/src/control.rs`, `apti-tui` |
 | Appendix D internal API: sensors and enforcement | `aptid/src/api.rs`, `aptid/src/allowlist.rs`, `apti-fail2ban`, `apti-rspamd` |
+| Hub mode: auto follow-back, TLP ingest cap, auto-trust, node directory | `aptid/src/hub.rs`, `aptid/src/inbox.rs`, `aptid/src/api.rs` (`/api/v1/nodes`), `apti-statsd` |
 
 ## Tests
 
@@ -780,6 +934,29 @@ cargo test --workspace
     without JavaScript, and with filters and slider changed. For 48
     combinations of country, behaviour, origin and frame, the number of
     observables in the details table matched the country's count.
+
+- **`aptid` hub mode** (`crates/aptid/tests/integration.rs`, `hub_mode`,
+  `hub_mode_manual_approval`): a node follows the hub and the hub follows it
+  back and trusts it; the hub ingests only TLP:CLEAR (a TLP:GREEN sighting is
+  dropped); a single node does not reach the `k = 2` quorum and a second
+  corroborating node activates the observable; the connected-node directory
+  lists the connected nodes; an operator distrusted by the administrator stays
+  distrusted when its node connects; when a node unfollows, the hub unfollows
+  it, withdraws the auto-trust and the observable drops below the quorum; and
+  with manual approval a pending follower is neither followed back nor
+  trusted until approved.
+- **`crates/apti-statsd`:**
+  - **Unit tests:** config validation, aggregate computation, the page
+    (no raw observable is rendered, the CSP matches the inline style, the
+    stale banner), the rate limiter (window reset, IPv6 /64 buckets, bounded
+    client table), the client address (`X-Forwarded-For` ignored unless
+    trusted, last entry used when trusted) and conditional requests.
+  - **End-to-end test** against an in-process aptid: the poller fetches with a
+    `max_tlp = "clear"` token, so only the TLP:CLEAR active entry is counted;
+    the hub's active list and timeline are not served (`404`); the page shows
+    aggregates with no raw observable; `ETag` / `304`; per-client rate
+    limiting returning `429`; stale-serve after the hub stops; and `503`
+    before the first fetch.
 
 ## Limitations
 

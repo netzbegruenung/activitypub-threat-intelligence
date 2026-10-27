@@ -1,0 +1,24 @@
+# Caddyfile for the public hub. Replace the example hosts with your own.
+#
+#   ti.example.net      -> aptid         (ActivityPub; Host is passed through)
+#   stats.example.net   -> apti-statsd   (public statistics page + node directory)
+#
+# Caddy terminates TLS (automatic HTTPS) and passes Host through for the
+# ActivityPub endpoints. The statistics page is a static file apti-statsd
+# rewrites after every poll, so Caddy serves it from the shared volume and
+# apti-statsd is never reachable from the network.
+
+ti.example.net {
+	reverse_proxy aptid:8080
+}
+
+stats.example.net {
+	root * /srv/stats
+	file_server
+	encode zstd gzip
+	# Rewritten every poll (poll.interval_secs); revalidate rather than cache.
+	header Cache-Control "no-cache"
+	header X-Content-Type-Options "nosniff"
+	header Referrer-Policy "no-referrer"
+	header X-Frame-Options "DENY"
+}

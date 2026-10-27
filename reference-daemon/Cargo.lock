@@ -192,6 +192,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "apti-statsd"
+version = "2026.10.10"
+dependencies = [
+ "anyhow",
+ "apti-core",
+ "aptid",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "httpdate",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "apti-tui"
 version = "2026.10.10"
 dependencies = [

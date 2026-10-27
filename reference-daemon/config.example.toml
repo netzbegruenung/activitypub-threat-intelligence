@@ -65,6 +65,14 @@ signature_max_age_secs = 43200
 # New evidence objects beyond this many live objects per remote publisher
 # are dropped.
 max_evidence_per_publisher = 100000
+# --- Hub mode (optional) ---------------------------------------------------
+# Follow back every AP-TI node that follows this one, so its evidence is
+# ingested automatically (no manual peer management). Off by default.
+auto_follow_back = false
+# Cap on the TLP of peer evidence this node ingests; objects more restrictive
+# than this are dropped. Leave the key out to ingest every shareable TLP.
+# Set to "clear" to make this node a public hub that ingests only TLP:CLEAR.
+# max_ingest_tlp = "clear"
 
 [publish]
 # Local observations are batched into Sightings at this interval (5-15 min).
@@ -99,6 +107,11 @@ allowlist = [
 retention_days = 30
 # Section 9: at least hourly; values above 3600 are rejected.
 recompute_interval_secs = 300
+# --- Hub mode (optional) ---------------------------------------------------
+# Trust every node that connects (is followed back) at this weight, so its
+# TLP:CLEAR evidence counts toward the quorum k. Off by default.
+auto_trust_followers = false
+auto_trust_weight = 1
 
 [audit]
 # Log every change to an observable (observations, evidence, allowlist,

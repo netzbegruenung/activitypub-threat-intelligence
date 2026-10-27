@@ -1,0 +1,76 @@
+# A public AP-TI hub: aptid in hub mode + apti-statsd (public statistics page
+# and connected-node directory) behind Caddy for TLS.
+#
+#   cp .env.example .env
+#   cp config/aptid-hub.example.toml config/aptid-hub.toml       # set [instance]
+#   cp config/apti-statsd.example.toml config/apti-statsd.toml
+#   cp Caddyfile.hub.example Caddyfile.hub                       # set hosts
+#   docker compose -f compose.hub.example.yaml build
+#   docker compose -f compose.hub.example.yaml up -d
+#   # create a read token (scope read, max_tlp "clear") for apti-statsd and
+#   # put its secret in config/apti-statsd.toml:
+#   docker compose -f compose.hub.example.yaml exec aptid apti-tui --socket /run/aptid/control.sock
+name: apti-hub
+
+services:
+  aptid:
+    build:
+      context: .
+      dockerfile: Dockerfile.aptid
+      args:
+        APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
+    image: apti/aptid:${APTI_VERSION}
+    restart: unless-stopped
+    volumes:
+      - ./config/aptid-hub.toml:/etc/aptid/config.toml:ro
+      - aptid-data:/var/lib/aptid
+      - aptid-run:/run/aptid
+    ports:
+      # ActivityPub listener: Caddy passes the Host header through.
+      - "127.0.0.1:8080:8080"
+      # Internal REST API: reached by apti-statsd over the compose network.
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /api/v1/health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"ok\"' <&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  apti-statsd:
+    build:
+      context: .
+      dockerfile: Dockerfile.apti-statsd
+      args:
+        APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
+    image: apti/apti-statsd:${APTI_VERSION}
+    restart: unless-stopped
+    depends_on:
+      aptid:
+        condition: service_healthy
+    volumes:
+      - ./config/apti-statsd.toml:/etc/apti-statsd/config.toml:ro
+      # The rendered page and node directory, served by Caddy. apti-statsd
+      # publishes no port of its own.
+      - statsd-public:/var/lib/apti-statsd/public
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [aptid, apti-statsd]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile.hub:/etc/caddy/Caddyfile:ro
+      - statsd-public:/srv/stats:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  aptid-data:
+  statsd-public:
+  aptid-run:
+  caddy-data:
+  caddy-config:
