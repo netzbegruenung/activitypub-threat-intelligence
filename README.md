@@ -1,13 +1,8 @@
 # ActivityPub Threat Intelligence (AP-TI)
 
-AP-TI lets organisations share network threat intelligence over ActivityPub.
+AP-TI lets you share threat intelligence with peers over ActivityPub.
 The shared observables are IP addresses, prefixes and domains linked to abuse
 such as SSH brute force, spam, scanning or command-and-control.
-
-STIX/TAXII and MISP work well inside a fixed sharing community, but they have
-no open discovery. ActivityPub adds discovery (WebFinger), a follow graph and
-domain-bound identity, so participants can find each other across
-organisational boundaries.
 
 ## Core ideas
 
