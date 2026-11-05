@@ -1,8 +1,8 @@
-# apti-fail2ban image: the connector plus fail2ban, which parses the log
-# files of other containers. The binary is glibc-linked, so this is Debian
-# (not Alpine). Binary comes from the GitHub release; nothing is pushed to
-# a registry.
-ARG DEBIAN_TAG=bookworm-slim
+# apti-fail2ban image: the connector only. fail2ban itself runs in its own
+# container (Dockerfile.fail2ban); the two exchange log files over volumes.
+# The binary is glibc-linked, so this is Debian (not Alpine). Binary comes
+# from the GitHub release; nothing is pushed to a registry.
+ARG DEBIAN_TAG=trixie-slim
 
 FROM debian:${DEBIAN_TAG} AS fetch
 ARG APTI_VERSION
@@ -16,13 +16,10 @@ RUN base="https://github.com/netzbegruenung/activitypub-threat-intelligence/rele
  && install -m 0755 apti-fail2ban-${APTI_VERSION}-linux-x86_64 /apti-fail2ban
 
 FROM debian:${DEBIAN_TAG}
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates tini fail2ban nftables iptables \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini \
  && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /var/lib/apti-fail2ban /var/log/apti-fail2ban /run/fail2ban
+ && mkdir -p /var/lib/apti-fail2ban /var/log/apti-fail2ban
 COPY --from=fetch /apti-fail2ban /usr/local/bin/
-# Filter for the ban files written by `apti-fail2ban pull` (build context: reference-daemon/).
-COPY crates/apti-fail2ban/fail2ban/filter.d/apti.conf /etc/fail2ban/filter.d/apti.conf
-COPY docker/entrypoint-fail2ban.sh /usr/local/bin/entrypoint
+COPY docker/entrypoint-apti-fail2ban.sh /usr/local/bin/entrypoint
 VOLUME ["/var/lib/apti-fail2ban", "/var/log/apti-fail2ban"]
 ENTRYPOINT ["tini", "--", "entrypoint"]

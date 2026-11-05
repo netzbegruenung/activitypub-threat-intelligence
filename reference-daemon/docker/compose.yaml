@@ -1,5 +1,5 @@
-# aptid + apti-fail2ban. Images are built locally, nothing is pulled from or
-# pushed to a registry:
+# aptid + apti-fail2ban + fail2ban. Images are built locally, nothing is
+# pulled from or pushed to a registry:
 #
 #   cp .env.example .env            # pick the release tag
 #   cp config/aptid.example.toml config/aptid.toml            # edit
@@ -8,7 +8,7 @@
 #   docker compose up -d aptid
 #   docker compose exec aptid apti-tui --socket /run/aptid/control.sock   # create tokens
 #   # put the tokens into config/apti-fail2ban.toml, then:
-#   docker compose up -d apti-fail2ban
+#   docker compose up -d fail2ban apti-fail2ban
 name: apti
 
 services:
@@ -36,9 +36,30 @@ services:
       retries: 3
       start_period: 10s
 
-  apti-fail2ban:
+  # fail2ban only. Bans are applied to the host's netfilter, so the container
+  # shares the host network and needs these capabilities. This is the only
+  # privileged part of the setup.
+  fail2ban:
     build:
       context: ..    # reference-daemon/, for the fail2ban filter
+      dockerfile: docker/Dockerfile.fail2ban
+    image: apti/fail2ban:${APTI_VERSION}
+    restart: unless-stopped
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW]
+    volumes:
+      - ./fail2ban/fail2ban.local:/etc/fail2ban/fail2ban.local:ro
+      - ./fail2ban/jail.d:/etc/fail2ban/jail.d:ro
+      - f2b-log:/var/log/fail2ban
+      # Ban files written by `apti-fail2ban pull`, followed by the apti jails.
+      - f2b-pull:/var/log/apti-fail2ban:ro
+      # Logs of other containers: see compose.landscape.example.yaml.
+
+  # The connector: reports fail2ban's bans to aptid and writes the active
+  # list back out for fail2ban. Unprivileged, no host network.
+  apti-fail2ban:
+    build:
+      context: ..    # reference-daemon/
       dockerfile: docker/Dockerfile.apti-fail2ban
       args:
         APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
@@ -47,21 +68,16 @@ services:
     depends_on:
       aptid:
         condition: service_healthy
-    # Bans are applied to the host's netfilter, so the container shares the
-    # host network and needs these capabilities. This is the only privileged
-    # part of the setup. aptid is reached through its published port.
-    network_mode: host
-    cap_add: [NET_ADMIN, NET_RAW]
     volumes:
       - ./config/apti-fail2ban.toml:/etc/apti-fail2ban/config.toml:ro
-      - ./fail2ban/fail2ban.local:/etc/fail2ban/fail2ban.local:ro
-      - ./fail2ban/jail.d:/etc/fail2ban/jail.d:ro
       - f2b-state:/var/lib/apti-fail2ban
       - f2b-pull:/var/log/apti-fail2ban
-      # Logs of other containers: see compose.landscape.example.yaml.
+      # fail2ban's log, read by `push`.
+      - f2b-log:/var/log/fail2ban:ro
 
 volumes:
   aptid-data:
   aptid-run:
   f2b-state:
   f2b-pull:
+  f2b-log:

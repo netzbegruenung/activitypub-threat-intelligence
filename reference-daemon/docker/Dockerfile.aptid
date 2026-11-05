@@ -1,6 +1,6 @@
 # aptid image: copies the released binaries (no Rust toolchain, no registry).
 # Build: docker compose build   (APTI_VERSION from .env, e.g. v2026.10.9)
-ARG DEBIAN_TAG=bookworm-slim
+ARG DEBIAN_TAG=trixie-slim
 
 FROM debian:${DEBIAN_TAG} AS fetch
 ARG APTI_VERSION

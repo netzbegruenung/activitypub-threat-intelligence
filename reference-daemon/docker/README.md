@@ -1,9 +1,10 @@
 # Docker
 
-Compose setup for `aptid` and `apti-fail2ban`. The images are built locally
-and nothing is pushed to a registry. Each Dockerfile downloads the released
-binary for `APTI_VERSION` from the GitHub release and checks it against the
-release's `SHA256SUMS`. There is no Rust toolchain in the build.
+Compose setup for `aptid`, `apti-fail2ban` and `fail2ban`. The images are
+built locally on Debian trixie and nothing is pushed to a registry. Each
+Dockerfile downloads the released binary for `APTI_VERSION` from the GitHub
+release and checks it against the release's `SHA256SUMS`. There is no Rust
+toolchain in the build.
 
 Only `linux/x86_64` is supported, because that is what the releases contain.
 
@@ -30,20 +31,26 @@ Create the API tokens in the TUI and copy the secrets into
 docker compose exec aptid apti-tui --socket /run/aptid/control.sock
 ```
 
-## apti-fail2ban
+## fail2ban and apti-fail2ban
 
 ```sh
-docker compose up -d apti-fail2ban
+docker compose up -d fail2ban apti-fail2ban
 ```
 
-The container runs `fail2ban-server` and `apti-fail2ban run` together and
-stops if either one exits. It uses the Debian base, because the released
-binary is linked against glibc.
+These are two containers. `fail2ban` runs stock `fail2ban-server` and does
+the banning; `apti-fail2ban` runs the connector. They exchange files over
+two volumes: `f2b-log` holds fail2ban's log, which `push` follows, and
+`f2b-pull` holds the ban files written by `pull`, which the `aptid-*` jails
+follow. The connector uses the Debian base, because the released binary is
+linked against glibc.
 
-- **Host network and capabilities:** `network_mode: host` with `NET_ADMIN`
-  and `NET_RAW` so the nftables action bans on the host. This is the only
-  privileged part. To only report bans, drop both and set `banaction = dummy`
-  in `fail2ban/jail.d/00-defaults.local`.
+- **Host network and capabilities:** only the `fail2ban` container runs with
+  `network_mode: host` and `NET_ADMIN`/`NET_RAW`, so the nftables action
+  bans on the host. This is the only privileged part. To only report bans,
+  drop both and set `banaction = dummy` in
+  `fail2ban/jail.d/00-defaults.local`.
+- **The connector is unprivileged** and reaches aptid over the compose
+  network (`http://aptid:8081`).
 - **Config:** `fail2ban/fail2ban.local` sets the log target to a file, which
   `push` needs. `fail2ban/jail.d/` holds the jails, including `aptid-ssh`
   fed by `pull`. That jail is in `push.ignore_jails`; keep it there.
@@ -89,7 +96,7 @@ docker compose -f compose.hub.example.yaml exec aptid apti-tui --socket /run/apt
 ## Parsing other containers' logs
 
 `compose.landscape.example.yaml` shows how to mount the log volumes of other
-services read-only into the `apti-fail2ban` container:
+services read-only into the `fail2ban` container:
 
 ```sh
 cp fail2ban/jail.d/landscape.local.example fail2ban/jail.d/landscape.local
@@ -100,13 +107,13 @@ Rules for this setup:
 
 1. The application must write its log to a **file** on a volume, not to
    stdout.
-2. Mount the same volume read-only into `apti-fail2ban` and point a jail's
+2. Mount the same volume read-only into `fail2ban` and point a jail's
    `logpath` at the file.
 3. Use `backend = polling` (the default here), because inotify is unreliable
    on shared volumes.
 4. Map each new jail to a behaviour in `[push.jails.<jail>]` of
    `config/apti-fail2ban.toml`. Unmapped jails are not reported.
-5. The image contains fail2ban's stock filters (`sshd`, `apache-auth`,
+5. The `fail2ban` image contains fail2ban's stock filters (`sshd`, `apache-auth`,
    `postfix`, ...). Mount custom ones into `/etc/fail2ban/filter.d/`.
 
 The service names, volumes and log paths in the example are placeholders.
@@ -115,6 +122,6 @@ Check each application's real log location.
 ## Notes
 
 - State lives in the named volumes `aptid-data` (database and actor key),
-  `aptid-run` (control socket), `f2b-state` and `f2b-pull`.
+  `aptid-run` (control socket), `f2b-state`, `f2b-pull` and `f2b-log`.
 - `SHA256SUMS` comes from the same release as the binary. It protects
   against corrupt downloads, not against a compromised release.

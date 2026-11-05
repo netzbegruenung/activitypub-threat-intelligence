@@ -1,0 +1,14 @@
+# fail2ban image: stock fail2ban plus the filter for the ban files written
+# by `apti-fail2ban pull`. The connector runs in its own container
+# (Dockerfile.apti-fail2ban). Build context: reference-daemon/.
+ARG DEBIAN_TAG=trixie-slim
+
+FROM debian:${DEBIAN_TAG}
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini fail2ban nftables iptables \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /var/log/fail2ban /var/log/apti-fail2ban /run/fail2ban
+COPY crates/apti-fail2ban/fail2ban/filter.d/apti.conf /etc/fail2ban/filter.d/apti.conf
+COPY docker/entrypoint-fail2ban.sh /usr/local/bin/entrypoint
+VOLUME ["/var/log/fail2ban"]
+ENTRYPOINT ["tini", "--", "entrypoint"]
