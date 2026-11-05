@@ -1,7 +1,7 @@
 # Builds release binaries when a tag vYYYY.MM.N or vYYYY.MM.NN is pushed and
 # attaches them to a GitHub release. Each binary is uploaded as an individual
 # artifact; example configs and fail2ban files are bundled in a separate
-# tarball. The tagged commit must be part of the main branch.
+# tarball and the amd64 Debian packages are attached as well. The tagged commit must be part of the main branch.
 # Mirrors .woodpecker/release.yaml.
 name: release
 
@@ -52,6 +52,7 @@ jobs:
           cp -r crates/apti-fail2ban/fail2ban ../config-pkg/
           cp -r crates/apti-rspamd/rspamd ../config-pkg/
           tar -czf "../dist/aptid-config-$TAG.tar.gz" -C ../config-pkg .
+          packaging/build-deb.sh "$TAG" target/release ../dist
           cd ../dist && sha256sum * > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:

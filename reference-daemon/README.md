@@ -30,6 +30,30 @@ cp config.example.toml /etc/aptid/config.toml   # then edit it
 
 Logging uses `RUST_LOG`, e.g. `RUST_LOG=aptid=debug`.
 
+### Debian packages
+
+Every release ships amd64 `.deb` packages for `aptid` (which also contains
+`apti-tui`), `apti-fail2ban`, `apti-rspamd`, `apti-statsd`, `apti-allowlist`
+and `apti-dashboard`. Each one installs the binary, a systemd unit and the
+default configuration as a conffile under `/etc/<name>/config.toml`, plus the
+fail2ban filter and the Rspamd drop-ins where applicable. The units are
+enabled but not started, because the shipped configuration still contains
+placeholders:
+
+```sh
+dpkg -i aptid_2026.10.10_amd64.deb
+editor /etc/aptid/config.toml
+systemctl start aptid
+```
+
+To build them from a checkout, compile the workspace first and then run
+[`packaging/build-deb.sh`](packaging/build-deb.sh):
+
+```sh
+cargo build --workspace --release
+packaging/build-deb.sh v2026.10.10 target/release ./dist
+```
+
 For containers, see [`docker/README.md`](docker/README.md): a compose file for
 `aptid` and for `apti-fail2ban` (with fail2ban inside), built locally from the
 release binaries.

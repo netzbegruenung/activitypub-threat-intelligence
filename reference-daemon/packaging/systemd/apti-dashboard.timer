@@ -1,0 +1,11 @@
+[Unit]
+Description=Render the AP-TI dashboard periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=AP-TI Rspamd connector
+Documentation=https://github.com/netzbegruenung/activitypub-threat-intelligence
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=apti-rspamd
+Group=apti-rspamd
+ExecStart=/usr/bin/apti-rspamd --config /etc/apti-rspamd/config.toml run
+Restart=on-failure
+RestartSec=5
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
