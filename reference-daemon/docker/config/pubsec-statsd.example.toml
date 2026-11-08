@@ -1,8 +1,10 @@
 # pubsec-statsd configuration for the docker hub setup.
 #
 # Points at the pubsecd service in the same compose file. Use a `read` token
-# whose max_tlp is "clear": only TLP:CLEAR entries are fetched. Only
-# aggregates and the node directory are served, never individual observables.
+# whose max_tlp is "green": that cap decides which entries the published
+# counts cover (a hub ingests TLP:CLEAR only, so there it changes nothing).
+# Only aggregates and the node directory are served, never individual
+# observables.
 # Create it with: docker compose exec pubsecd pubsec-tui --socket /run/pubsecd/control.sock
 
 [pubsecd]

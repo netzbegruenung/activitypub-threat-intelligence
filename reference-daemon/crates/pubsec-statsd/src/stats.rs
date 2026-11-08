@@ -1,4 +1,4 @@
-//! Aggregate statistics over the hub's TLP:CLEAR dataset.
+//! Aggregate statistics over the dataset the poller's token can see.
 //!
 //! These are the only numbers the public page shows. Individual IPs,
 //! prefixes and domains are never aggregated here: they are personal data

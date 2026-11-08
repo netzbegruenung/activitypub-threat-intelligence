@@ -386,7 +386,7 @@ async fn list_following(state: &AppState) -> anyhow::Result<Vec<FollowingInfo>> 
                         name,
                         summary,
                         operator: map.get(&f.actor).map(|(o, _)| o.clone()),
-                        evidence: db::count_evidence_by_publisher(c, &f.actor)?,
+                        evidence: db::count_evidence_by_publisher(c, &f.actor, Tlp::Red)?,
                         actor: f.actor,
                         handle: f.handle,
                         state: f.state,

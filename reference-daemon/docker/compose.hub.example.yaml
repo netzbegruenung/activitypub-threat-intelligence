@@ -7,7 +7,7 @@
 #   cp Caddyfile.hub.example Caddyfile.hub                       # set hosts
 #   docker compose -f compose.hub.example.yaml build
 #   docker compose -f compose.hub.example.yaml up -d
-#   # create a read token (scope read, max_tlp "clear") for pubsec-statsd and
+#   # create a read token (scope read, max_tlp "green") for pubsec-statsd and
 #   # put its secret in config/pubsec-statsd.toml:
 #   docker compose -f compose.hub.example.yaml exec pubsecd pubsec-tui --socket /run/pubsecd/control.sock
 name: pubsec-hub

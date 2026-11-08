@@ -1,7 +1,8 @@
 //! Minimal read-only client for the pubsecd internal REST API.
 //!
-//! The client is authenticated with a `read` token whose `max_tlp` is
-//! `clear`; the hub therefore only ever returns TLP:CLEAR entries.
+//! The client is authenticated with a `read` token; the hub filters every
+//! response against that token's `max_tlp`, so the cap chosen when the token
+//! is created decides which entries the aggregates cover.
 
 use std::time::Duration;
 
@@ -125,7 +126,7 @@ impl PubsecdClient {
         })
     }
 
-    /// The hub's active list (TLP:CLEAR entries only, per the token).
+    /// The hub's active list, capped at the token's `max_tlp`.
     pub async fn active(&self) -> anyhow::Result<ActiveList> {
         let resp = self
             .http

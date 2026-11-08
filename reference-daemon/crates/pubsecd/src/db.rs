@@ -976,12 +976,19 @@ pub fn count_evidence(c: &Connection) -> anyhow::Result<u64> {
     )? as u64)
 }
 
-pub fn count_evidence_by_publisher(c: &Connection, publisher: &str) -> anyhow::Result<u64> {
-    Ok(c.query_row(
-        "SELECT COUNT(*) FROM evidence WHERE deleted IS NULL AND publisher = ?1",
-        [publisher],
-        |r| r.get::<_, i64>(0),
-    )? as u64)
+pub fn count_evidence_by_publisher(
+    c: &Connection,
+    publisher: &str,
+    max_tlp: Tlp,
+) -> anyhow::Result<u64> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM evidence WHERE deleted IS NULL AND publisher = ?1 AND {} <= {}",
+        tlp_rank_sql("tlp"),
+        tlp_rank_sql("?2")
+    );
+    Ok(c.query_row(&sql, rusqlite::params![publisher, max_tlp.as_str()], |r| {
+        r.get::<_, i64>(0)
+    })? as u64)
 }
 
 /// Delete old records (Section 11). Remote evidence is removed once it can
@@ -1755,6 +1762,26 @@ mod tests {
             "count": 1, "tlp": "green"
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn evidence_count_is_capped_at_max_tlp() {
+        let db = Db::open_in_memory().unwrap();
+        db.call(|c| {
+            let now: DateTime<Utc> = "2026-10-03T10:00:00.123Z".parse()?;
+            for (id, tlp) in [("s/1", "clear"), ("s/2", "green"), ("s/3", "amber")] {
+                let mut o = sighting(&format!("https://a.example/{id}"), now);
+                o.tlp = tlp.parse().map_err(anyhow::Error::msg)?;
+                upsert_evidence(c, &o, false, &[], None)?;
+            }
+            let publisher = "https://a.example/actor";
+            assert_eq!(count_evidence_by_publisher(c, publisher, Tlp::Clear)?, 1);
+            assert_eq!(count_evidence_by_publisher(c, publisher, Tlp::Green)?, 2);
+            assert_eq!(count_evidence_by_publisher(c, publisher, Tlp::Red)?, 3);
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

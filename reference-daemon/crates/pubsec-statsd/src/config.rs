@@ -25,8 +25,8 @@ pub struct Config {
 pub struct Pubsecd {
     /// Base URL of the hub's internal REST API.
     pub url: String,
-    /// Token with scope `read` and `max_tlp = "clear"`, so only TLP:CLEAR
-    /// entries are ever fetched.
+    /// Token with scope `read`. Its `max_tlp` decides which entries the
+    /// aggregates cover; `green` is the recommended cap for a public page.
     pub read_token: String,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,

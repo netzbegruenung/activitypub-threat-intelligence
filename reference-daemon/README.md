@@ -14,7 +14,7 @@ It follows the deployment model of Appendix D. The workspace contains these crat
 | `pubsec-allowlist` | connector | Keeps pubsecd's local allowlist in sync with a text file (bulk import). |
 | `pubsec-rspamd` | connector | Reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to pubsecd, and serves pubsecd's active list to Rspamd as multimap files. |
 | `pubsec-dashboard` | tool | Renders a static HTML world map of findings per country (GeoIP), with a time slider and behaviour/origin filters. |
-| `pubsec-statsd` | connector | Publishes aggregate statistics over a hub's TLP:CLEAR dataset: a statistics page (no individual observables) and a JSON directory of the hub's connected nodes. |
+| `pubsec-statsd` | connector | Publishes aggregate statistics over a hub's dataset: a statistics page (no individual observables) and a JSON directory of the hub's connected nodes. |
 
 ## Build and run
 
@@ -281,7 +281,8 @@ curl -H "Authorization: Bearer $TOKEN" https://ti-internal:8081/api/v1/nodes
 The actors this node follows, one entry each, with the display `handle` and
 `name` (cached actor document), the resolved `operator`, how much `evidence`
 that actor has published, and the follow `state` (`pending`, `accepted` or
-`rejected`). On a [hub](#hub-mode) these are the connected nodes, so this is
+`rejected`). `evidence` counts only entries up to the token's `max_tlp`, like
+the active list and timeline. On a [hub](#hub-mode) these are the connected nodes, so this is
 the public node directory that `pubsec-statsd` republishes.
 
 ### Manage the allowlist
@@ -741,11 +742,10 @@ TLP:CLEAR, its active list and timeline contain TLP:CLEAR entries only. See
 
 ## pubsec-statsd
 
-`pubsec-statsd` publishes aggregate statistics over a hub's TLP:CLEAR dataset.
-It polls the hub's internal REST API (`GET /api/v1/active`,
-`/api/v1/timeline`, `/api/v1/nodes`) every `poll.interval_secs` with a `read`
-token whose `max_tlp = "clear"`, reduces the active list and timeline to
-counts, and publishes:
+`pubsec-statsd` publishes aggregate statistics over a hub's dataset. It polls
+the hub's internal REST API (`GET /api/v1/active`, `/api/v1/timeline`,
+`/api/v1/nodes`) every `poll.interval_secs` with a `read` token, reduces the
+active list and timeline to counts, and publishes:
 
 | File / path | Content |
 |---|---|
@@ -766,9 +766,13 @@ pubsec-statsd -c /etc/pubsec-statsd/config.toml summary
 pubsec-statsd -c /etc/pubsec-statsd/config.toml run
 ```
 
-- **TLP and personal data:** the hub ingests only TLP:CLEAR and the poller's
-  token is capped at `max_tlp = "clear"`, so only TLP:CLEAR entries are ever
-  fetched. Individual IPs, prefixes and domains are personal data even at
+- **TLP and personal data:** the poller's token `max_tlp` caps every figure on
+  the page consistently — active observables, findings and the per-node
+  evidence counts alike. `--max-tlp green` is recommended: it covers the whole
+  community-shareable dataset, and on a hub it changes nothing anyway, since a
+  hub ingests TLP:CLEAR evidence only. Capping above `green` publishes figures
+  derived from limited-disclosure data; prefer not to. Independently of the
+  cap, individual IPs, prefixes and domains are personal data even at
   TLP:CLEAR (Sec. 11), so they are never served: the active list and timeline
   are not republished, and the page shows counts and distributions only.
 ### Static output (default)

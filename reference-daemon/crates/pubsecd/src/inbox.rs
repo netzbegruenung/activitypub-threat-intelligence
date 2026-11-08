@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use pubsec_core::{EvidenceKind, EvidenceObject, MAX_BATCH};
+use pubsec_core::{EvidenceKind, EvidenceObject, Tlp, MAX_BATCH};
 use serde_json::{json, Value};
 
 use crate::audit::Origin;
@@ -116,7 +116,7 @@ pub async fn ingest_objects(
             let by = Origin::Peer(actor.clone());
             // Bound the storage and engine work one publisher can cause
             // (Section 10). Updates of known objects are always accepted.
-            let mut live = db::count_evidence_by_publisher(c, &actor)?;
+            let mut live = db::count_evidence_by_publisher(c, &actor, Tlp::Red)?;
             let mut over_quota = 0;
             for o in &valid {
                 if live >= quota && db::get_evidence(c, &o.id)?.is_none() {

@@ -62,8 +62,8 @@ linked against glibc.
 `compose.hub.example.yaml` runs a public hub: `pubsecd` in hub mode (follows
 back every node that connects, ingests only TLP:CLEAR, and trusts connected
 nodes) and `pubsec-statsd`, which publishes an aggregate statistics page over
-the hub's TLP:CLEAR dataset and a JSON directory of connected nodes, behind
-Caddy for TLS.
+the hub's dataset and a JSON directory of connected nodes, behind Caddy for
+TLS.
 
 ```sh
 cd docker

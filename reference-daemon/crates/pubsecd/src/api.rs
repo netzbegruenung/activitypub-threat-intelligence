@@ -379,14 +379,17 @@ pub struct NodeInfo {
 }
 
 /// Connected nodes (the actors we follow). On a hub these are the nodes that
-/// have connected, so this is the public node directory.
+/// have connected, so this is the public node directory. Evidence counts are
+/// capped at the token's `max_tlp`, like the active list and timeline.
 async fn nodes(State(state): State<Shared>, headers: HeaderMap) -> Response {
-    if let Err(r) = authorise(&state, &headers, ApiScope::Read).await {
-        return r;
-    }
+    let token = match authorise(&state, &headers, ApiScope::Read).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let max_tlp = token.max_tlp;
     let nodes = match state
         .db
-        .call(|c| {
+        .call(move |c| {
             let map = db::actor_operator_map(c)?;
             db::list_following(c)?
                 .into_iter()
@@ -406,7 +409,7 @@ async fn nodes(State(state): State<Shared>, headers: HeaderMap) -> Response {
                         name,
                         summary,
                         operator: map.get(&f.actor).map(|(o, _)| o.clone()),
-                        evidence: db::count_evidence_by_publisher(c, &f.actor)?,
+                        evidence: db::count_evidence_by_publisher(c, &f.actor, max_tlp)?,
                         state: f.state,
                     })
                 })

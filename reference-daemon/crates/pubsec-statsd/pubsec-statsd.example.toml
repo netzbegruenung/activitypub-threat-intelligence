@@ -1,14 +1,21 @@
 # pubsec-statsd: public statistics page for an AP-TI hub.
 #
 # It polls the hub's internal REST API and publishes aggregates over its
-# TLP:CLEAR dataset: a self-contained statistics page (no individual IPs,
-# prefixes or domains, per Section 11) and a JSON directory of the hub's
-# connected nodes. Individual observables are never served.
+# dataset: a self-contained statistics page (no individual IPs, prefixes or
+# domains, per Section 11) and a JSON directory of the hub's connected nodes.
+# Individual observables are never served.
 #
-# Create the [pubsecd] token in the hub's pubsecd with scope `read` and
-# `max_tlp = "clear"`, so only TLP:CLEAR entries are ever fetched:
+# Create the [pubsecd] token in the hub's pubsecd with scope `read`. Its
+# `max_tlp` caps every figure on the page: active observables, findings and
+# the per-node evidence counts. `green` covers the whole community-shareable
+# dataset and is the recommended cap for a public page:
 #
-#   pubsecd token add --name stats --scope read --max-tlp clear
+#   pubsecd token add --name stats --scope read --max-tlp green
+#
+# Use `--max-tlp clear` to publish counts over TLP:CLEAR entries only. On a
+# hub it makes no difference, since a hub ingests TLP:CLEAR evidence only.
+# Capping above `green` means publishing figures derived from data that was
+# shared under a limited-disclosure marking; prefer not to.
 
 [pubsecd]
 # Base URL of the hub's internal REST API.
