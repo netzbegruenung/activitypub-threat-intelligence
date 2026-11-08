@@ -8,6 +8,7 @@
 
 use std::fmt::Write;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
@@ -83,9 +84,10 @@ pub fn escape(s: &str) -> String {
 
 /// CSP source expression for an inline element's content.
 pub fn csp_hash(content: &str) -> String {
-    let h = Sha256::digest(content.as_bytes());
-    let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
-    format!("'sha256-{hex}'")
+    format!(
+        "'sha256-{}'",
+        STANDARD.encode(Sha256::digest(content.as_bytes()))
+    )
 }
 
 pub fn content_security_policy() -> String {
@@ -188,6 +190,7 @@ pub fn page(p: &Page) -> String {
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>{title}</title>
+<link rel="icon" href="data:,">
 <style>{CSS}</style>
 </head>
 <body>
@@ -367,7 +370,9 @@ mod tests {
         // Self-contained: no script, no external references.
         assert!(!html.contains("<script"));
         assert!(!html.contains("src="));
-        assert!(!html.contains("href="));
+        // The empty inline icon is the only href, and it fetches nothing.
+        assert_eq!(html.matches("href=").count(), 1);
+        assert!(html.contains(r#"<link rel="icon" href="data:,">"#));
     }
 
     #[test]
