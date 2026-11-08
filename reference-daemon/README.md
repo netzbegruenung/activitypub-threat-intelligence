@@ -68,7 +68,7 @@ To build them from a checkout, compile the workspace first and then run
 
 ```sh
 cargo build --workspace --release
-packaging/build-deb.sh v2026.11.2 target/release ./dist
+packaging/build-deb.sh v2026.11.3 target/release ./dist
 ```
 
 The argument only names the package; the version the binaries report comes from
