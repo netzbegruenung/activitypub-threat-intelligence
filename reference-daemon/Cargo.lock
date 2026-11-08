@@ -1266,7 +1266,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pubsec-allowlist"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "pubsec-core"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "chrono",
  "idna",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "pubsec-dashboard"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "pubsec-fail2ban"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1340,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "pubsec-rspamd"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "pubsec-statsd"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "pubsec-tui"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "pubsecd"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "anyhow",
  "axum",
