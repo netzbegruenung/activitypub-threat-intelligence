@@ -38,7 +38,9 @@ table { width:100%; border-collapse:collapse; font-size:.9rem; }
 th, td { text-align:left; padding:.45rem .7rem; border:1px solid var(--line); vertical-align:top; }
 th { color:var(--amber); font-weight:normal; }
 td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
-.bar { display:inline-block; height:.5rem; background:var(--amber); vertical-align:middle; }
+h2.sub { margin-top:1.5rem; }
+td.bar { color:var(--amber); white-space:nowrap; width:1%; }
+td.bar .o { color:var(--dim); opacity:.5; }
 .note { color:var(--dim); font-size:.85rem; margin:.5rem 0 0; }
 footer { color:var(--dim); font-size:.85rem; margin-top:4rem; padding-top:1rem; border-top:1px solid var(--line); }
 footer p { margin:0 0 .75rem; }
@@ -97,6 +99,21 @@ fn fmt_time(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// Width of a distribution bar, in characters.
+const BAR_CELLS: usize = 24;
+
+/// A bar drawn with block characters, so no per-element style attribute is
+/// needed and the page stays within its style-src hash.
+fn bar(n: usize, max: usize) -> String {
+    let filled = ((n as f64 / max as f64) * BAR_CELLS as f64).round() as usize;
+    let filled = filled.clamp(if n > 0 { 1 } else { 0 }, BAR_CELLS);
+    format!(
+        "{}<span class=\"o\">{}</span>",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(BAR_CELLS - filled)
+    )
+}
+
 /// A behaviour distribution table with relative bars.
 fn behavior_table(rows: &[(pubsec_core::Behavior, usize)], empty: &str) -> String {
     if rows.is_empty() {
@@ -104,15 +121,14 @@ fn behavior_table(rows: &[(pubsec_core::Behavior, usize)], empty: &str) -> Strin
     }
     let max = rows.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
     let mut h = String::from(
-        "<table><thead><tr><th>Behaviour</th><th class=\"n\">Count</th><th style=\"width:38%\"></th></tr></thead><tbody>",
+        "<table><thead><tr><th>Behaviour</th><th class=\"n\">Count</th><th></th></tr></thead><tbody>",
     );
     for (b, n) in rows {
-        let width = *n as f64 / max as f64 * 100.0;
         let _ = write!(
             h,
-            "<tr><td>{}</td><td class=\"n\">{n}</td><td><span class=\"bar\" style=\"width:{:.0}%\"></span></td></tr>",
+            "<tr><td>{}</td><td class=\"n\">{n}</td><td class=\"bar\">{}</td></tr>",
             escape(b.as_str()),
-            width
+            bar(*n, max)
         );
     }
     h.push_str("</tbody></table>");
@@ -209,7 +225,7 @@ pub fn page(p: &Page) -> String {
 {type_rows}
 </table>
 <p class="note">{flagged_note}</p>
-<h2 style="margin-top:1.5rem">By behaviour</h2>
+<h2 class="sub">By behaviour</h2>
 {active_behaviors}
 </section>
 <section>
@@ -217,7 +233,7 @@ pub fn page(p: &Page) -> String {
 <table>
 {findings_types}
 </table>
-<h2 style="margin-top:1.5rem">By behaviour</h2>
+<h2 class="sub">By behaviour</h2>
 {findings_behaviors}
 </section>
 <section>
@@ -363,6 +379,9 @@ mod tests {
         assert!(csp.contains(&csp_hash(&html[style_start..style_end])));
         assert!(html.contains(&escape(&csp)));
         assert!(csp.starts_with("default-src 'none'"));
+        // Style attributes are not covered by a style-src hash, so the page
+        // must not use any.
+        assert!(!html.contains("style=\""));
     }
 
     #[test]
