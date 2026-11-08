@@ -14,10 +14,36 @@ use crate::client::{ActiveEntry, NodeInfo, TimelineEntry, TimelineOrigin};
 /// Per-behaviour counts, largest first.
 pub type BehaviorCounts = Vec<(Behavior, usize)>;
 
+/// A connected node as shown in the public directory.
+#[derive(Debug, Clone)]
+pub struct NodeRow {
+    pub label: String,
+    pub operator: Option<String>,
+    pub evidence: u64,
+}
+
+impl NodeRow {
+    fn from_info(n: &NodeInfo) -> Self {
+        let label = n
+            .handle
+            .as_deref()
+            .or(n.name.as_deref())
+            .unwrap_or(&n.actor)
+            .to_string();
+        Self {
+            label,
+            operator: n.operator.clone(),
+            evidence: n.evidence,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
     /// Connected nodes (the hub's follow list).
     pub nodes: usize,
+    /// The connected nodes themselves, most evidence first.
+    pub node_list: Vec<NodeRow>,
     /// Sum of evidence ingested from all connected nodes.
     pub evidence_ingested: u64,
     /// Current active (corroborated) observables.
@@ -89,8 +115,15 @@ impl Stats {
                 TimelineOrigin::Federated => federated += 1,
             }
         }
+        let mut node_list: Vec<NodeRow> = nodes.iter().map(NodeRow::from_info).collect();
+        node_list.sort_by(|a, b| {
+            b.evidence
+                .cmp(&a.evidence)
+                .then_with(|| a.label.cmp(&b.label))
+        });
         Self {
             nodes: nodes.len(),
+            node_list,
             evidence_ingested: nodes.iter().map(|n| n.evidence).sum(),
             active_total: active.len(),
             active_ipv4: a4,

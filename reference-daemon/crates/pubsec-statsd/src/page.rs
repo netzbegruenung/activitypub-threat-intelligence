@@ -14,32 +14,43 @@ use sha2::{Digest, Sha256};
 use crate::stats::Stats;
 
 const CSS: &str = r#"
-:root { color-scheme: light dark; --fg:#182230; --muted:#5b6675; --line:#d5dbe3; --bg:#f4f6f8; --card:#ffffff; --accent:#0b6e4f; }
-@media (prefers-color-scheme: dark) { :root { --fg:#e6ebf2; --muted:#9aa6b5; --line:#2a333f; --bg:#12161c; --card:#1a212b; --accent:#3fb88f; } }
+:root { color-scheme: dark; --bg:#04070a; --fg:#33ff99; --dim:#1d7a52; --amber:#ffb000; --line:#0e2a1e; --card:#060b0e; }
 * { box-sizing: border-box; }
-body { margin:0; font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; color:var(--fg); background:var(--bg); }
-.wrap { max-width: 960px; margin:0 auto; padding:28px 20px 56px; }
-header { margin-bottom:24px; }
-h1 { font-size:26px; margin:0 0 6px; letter-spacing:-.01em; }
-.meta { color:var(--muted); margin:0; font-size:14px; }
-.badge { display:inline-block; margin-top:10px; padding:3px 10px; border-radius:999px; font-size:12.5px; font-weight:600; letter-spacing:.02em; background:color-mix(in srgb, var(--accent) 15%, transparent); color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
-.stale { margin-top:10px; padding:8px 12px; border-radius:8px; font-size:14px; background:color-mix(in srgb, #b45309 12%, transparent); border:1px solid color-mix(in srgb, #b45309 40%, transparent); }
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin:0 0 26px; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
-.card .n { font-size:30px; font-weight:700; line-height:1.1; }
-.card .l { color:var(--muted); font-size:13.5px; margin-top:4px; }
-section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:0 0 20px; }
-h2 { font-size:17px; margin:0 0 14px; }
-table { width:100%; border-collapse:collapse; font-size:14px; }
-th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); }
-th { color:var(--muted); font-weight:600; font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; }
+html { background:var(--bg); color:var(--fg); font:16px/1.6 "DejaVu Sans Mono","Liberation Mono","Courier New",monospace; }
+body { margin:0; text-shadow:0 0 6px rgba(51,255,153,.35); }
+body::after { content:""; position:fixed; inset:0; pointer-events:none; z-index:1; background:radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.75) 100%); }
+.wrap { max-width:56rem; margin-inline:auto; padding:2.5rem 1.25rem 5rem; }
+pre.banner { color:var(--fg); font-size:clamp(.4rem,1.75vw,.85rem); line-height:1.1; margin:0 0 .75rem; overflow-x:clip; }
+header { margin-bottom:2rem; }
+h1 { font-size:1rem; font-weight:normal; color:var(--amber); margin:0 0 .35rem; }
+.meta { color:var(--dim); margin:0; font-size:.85rem; }
+.badge { display:inline-block; margin-top:.6rem; padding:.1rem .6rem; font-size:.8rem; color:var(--amber); border:1px solid var(--amber); }
+.stale { margin-top:.6rem; padding:.5rem .75rem; font-size:.9rem; color:var(--amber); border:1px solid var(--amber); border-left-width:3px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(11rem,1fr)); gap:.75rem; margin:0 0 1.5rem; }
+.card { background:#000; border:1px solid var(--line); border-left:3px solid var(--dim); padding:.9rem 1rem; }
+.card .n { font-size:1.9rem; line-height:1.1; color:var(--amber); }
+.card .l { color:var(--dim); font-size:.8rem; margin-top:.25rem; }
+section { margin:0 0 1.5rem; }
+h2 { font-size:1rem; font-weight:normal; color:var(--amber); border-bottom:1px solid var(--line); padding-bottom:.35rem; margin:2rem 0 1rem; }
+h2::before { content:"[ "; color:var(--dim); }
+h2::after { content:" ]"; color:var(--dim); }
+table { width:100%; border-collapse:collapse; font-size:.9rem; }
+th, td { text-align:left; padding:.45rem .7rem; border:1px solid var(--line); vertical-align:top; }
+th { color:var(--amber); font-weight:normal; }
 td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
-tr:last-child td { border-bottom:none; }
-.bar { display:inline-block; height:8px; border-radius:4px; background:var(--accent); vertical-align:middle; }
-.note { color:var(--muted); font-size:13px; margin:6px 0 0; }
-footer { color:var(--muted); font-size:13px; margin-top:28px; line-height:1.6; }
-.empty { color:var(--muted); }
+.bar { display:inline-block; height:.5rem; background:var(--amber); vertical-align:middle; }
+.note { color:var(--dim); font-size:.85rem; margin:.5rem 0 0; }
+footer { color:var(--dim); font-size:.85rem; margin-top:4rem; padding-top:1rem; border-top:1px solid var(--line); }
+footer p { margin:0 0 .75rem; }
+.empty { color:var(--dim); }
 "#;
+
+const BANNER: &str = r#" ██████╗ ██╗   ██╗██████╗ ███████╗███████╗ ██████╗
+ ██╔══██╗██║   ██║██╔══██╗██╔════╝██╔════╝██╔════╝
+ ██████╔╝██║   ██║██████╔╝███████╗█████╗  ██║
+ ██╔═══╝ ██║   ██║██╔══██╗╚════██║██╔══╝  ██║
+ ██║     ╚██████╔╝██████╔╝███████║███████╗╚██████╗
+ ╚═╝      ╚═════╝ ╚═════╝ ╚══════╝╚══════╝ ╚═════╝"#;
 
 pub struct Page<'a> {
     pub title: &'a str,
@@ -108,6 +119,27 @@ fn behavior_table(rows: &[(pubsec_core::Behavior, usize)], empty: &str) -> Strin
     h
 }
 
+/// The connected nodes, with the evidence each contributed.
+fn node_table(rows: &[crate::stats::NodeRow]) -> String {
+    if rows.is_empty() {
+        return "<p class=\"empty\">No node is connected.</p>".to_string();
+    }
+    let mut h = String::from(
+        "<table><thead><tr><th>Node</th><th>Operator</th><th class=\"n\">Evidence</th></tr></thead><tbody>",
+    );
+    for r in rows {
+        let _ = write!(
+            h,
+            "<tr><td>{}</td><td>{}</td><td class=\"n\">{}</td></tr>",
+            escape(&r.label),
+            escape(r.operator.as_deref().unwrap_or("—")),
+            r.evidence
+        );
+    }
+    h.push_str("</tbody></table>");
+    h
+}
+
 fn type_row(label: &str, n: usize) -> String {
     format!("<tr><td>{label}</td><td class=\"n\">{n}</td></tr>")
 }
@@ -144,6 +176,7 @@ pub fn page(p: &Page) -> String {
 </head>
 <body>
 <div class="wrap">
+<pre class="banner">{banner}</pre>
 <header>
 <h1>{title}</h1>
 <p class="meta">Data as of {generated} UTC &middot; refreshed every {interval}s</p>
@@ -157,6 +190,7 @@ pub fn page(p: &Page) -> String {
 {findings_card}
 </div>"#,
         csp = escape(&content_security_policy()),
+        banner = BANNER,
         interval = p.interval_secs,
         nodes_card = c("connected nodes", s.nodes as u64),
         evidence_card = c("evidence ingested", s.evidence_ingested),
@@ -175,7 +209,7 @@ pub fn page(p: &Page) -> String {
 {type_rows}
 </table>
 <p class="note">{flagged_note}</p>
-<h2 style="margin-top:20px">By behaviour</h2>
+<h2 style="margin-top:1.5rem">By behaviour</h2>
 {active_behaviors}
 </section>
 <section>
@@ -183,8 +217,14 @@ pub fn page(p: &Page) -> String {
 <table>
 {findings_types}
 </table>
-<h2 style="margin-top:20px">By behaviour</h2>
+<h2 style="margin-top:1.5rem">By behaviour</h2>
 {findings_behaviors}
+</section>
+<section>
+<h2>Connected nodes</h2>
+{nodes_table}
+<p class="note">Nodes the hub has accepted a follow from, as they describe themselves. The
+operator is self-declared and is not verified.</p>
 </section>
 <footer>
 <p>Figures are aggregates over the hub&rsquo;s TLP:CLEAR dataset. Individual IP addresses,
@@ -221,6 +261,7 @@ feeds&rdquo;, not a verdict.</p>
         ]
         .join("\n"),
         findings_behaviors = behavior_table(&s.findings_by_behavior, "No findings in this window."),
+        nodes_table = node_table(&s.node_list),
         version = env!("CARGO_PKG_VERSION"),
     );
     h
@@ -277,10 +318,10 @@ mod tests {
             &findings,
             &[NodeInfo {
                 actor: "a".into(),
-                handle: None,
+                handle: Some("feed@peer.example".into()),
                 name: None,
                 summary: None,
-                operator: None,
+                operator: Some("Peer Org".into()),
                 evidence: 7,
                 state: "accepted".into(),
             }],
@@ -332,5 +373,22 @@ mod tests {
         assert!(html.contains("under dispute"));
         let fresh = render(false);
         assert!(!fresh.contains("unreachable"));
+    }
+
+    #[test]
+    fn lists_connected_nodes() {
+        let html = render(false);
+        assert!(html.contains("Connected nodes"));
+        assert!(html.contains("feed@peer.example"));
+        assert!(html.contains("Peer Org"));
+        assert!(page(&Page {
+            title: "Hub",
+            generated: Utc::now(),
+            stale: false,
+            stats: &Stats::default(),
+            window_days: 30,
+            interval_secs: 60,
+        })
+        .contains("No node is connected."));
     }
 }

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/pubsec-core", "crates/pubsecd", "crates/pubsec-tui", "crates/pubsec-fail2ban", "crates/pubsec-allowlist", "crates/pubsec-rspamd", "crates/pubsec-dashboard", "crates/pubsec-statsd"]
 
 [workspace.package]
-version = "2026.10.10"
+version = "2026.11.2"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

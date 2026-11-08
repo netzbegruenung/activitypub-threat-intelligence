@@ -16,6 +16,15 @@ steps:
       - echo "$CI_COMMIT_TAG" | grep -Eq '^v[0-9]{4}\.(0[1-9]|1[0-2])\.[0-9]{1,2}$'
       - git fetch --unshallow origin main:refs/remotes/origin/main || git fetch origin main:refs/remotes/origin/main
       - git merge-base --is-ancestor "$CI_COMMIT_SHA" refs/remotes/origin/main
+      # The binaries report their version from CARGO_PKG_VERSION while the
+      # Debian packages are named after the tag, so a forgotten bump would
+      # ship a package that misreports its own version.
+      - |
+        workspace_version=$$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' reference-daemon/Cargo.toml)
+        if [ "v$$workspace_version" != "$CI_COMMIT_TAG" ]; then
+          echo "tag $CI_COMMIT_TAG does not match workspace version $$workspace_version" >&2
+          exit 1
+        fi
 
   - name: test
     image: rust:1.85-bookworm
@@ -49,3 +58,27 @@ steps:
       files:
         - dist/*
       title: ${CI_COMMIT_TAG}
+
+  # Tells repo.pubsec.net to mirror the new release into its Debian pool.
+  # The receiver authenticates the request by the HMAC over the body alone.
+  - name: publish-apt-repo
+    image: alpine:3.21
+    depends_on: [release]
+    environment:
+      WEBHOOK_URL:
+        from_secret: apt_repo_webhook_url
+      WEBHOOK_SECRET:
+        from_secret: apt_repo_webhook_secret
+    commands:
+      - apk add --no-cache curl openssl
+      - |
+        if [ -z "$$WEBHOOK_URL" ] || [ -z "$$WEBHOOK_SECRET" ]; then
+          echo "APT repository webhook not configured, skipping."
+          exit 0
+        fi
+        body=$$(printf '{"tag":"%s"}' "$CI_COMMIT_TAG")
+        sig=$$(printf '%s' "$$body" | openssl dgst -sha256 -hmac "$$WEBHOOK_SECRET" -r | cut -d' ' -f1)
+        curl -fsS --retry 3 --retry-delay 10 -X POST "$$WEBHOOK_URL" \
+          -H 'Content-Type: application/json' \
+          -H "X-Hub-Signature-256: sha256=$$sig" \
+          --data "$$body"

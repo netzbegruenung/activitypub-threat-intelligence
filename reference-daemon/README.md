@@ -68,8 +68,12 @@ To build them from a checkout, compile the workspace first and then run
 
 ```sh
 cargo build --workspace --release
-packaging/build-deb.sh v2026.10.10 target/release ./dist
+packaging/build-deb.sh v2026.11.2 target/release ./dist
 ```
+
+The argument only names the package; the version the binaries report comes from
+`version` in the workspace `Cargo.toml`. Bump it before tagging a release — the
+release pipeline refuses a tag that does not match it.
 
 For containers, see [`docker/README.md`](docker/README.md): a compose file for
 `pubsecd` and for `pubsec-fail2ban` (with fail2ban inside), built locally from the
