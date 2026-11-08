@@ -10,6 +10,7 @@ use std::fmt::Write;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
+use pubsec_core::Tlp;
 use sha2::{Digest, Sha256};
 
 use crate::stats::Stats;
@@ -171,6 +172,14 @@ pub fn page(p: &Page) -> String {
     } else {
         ""
     };
+    let badge = match s.max_tlp {
+        None => String::new(),
+        Some(Tlp::Clear) => "<p><span class=\"badge\">TLP:CLEAR only</span></p>".to_string(),
+        Some(t) => format!(
+            "<p><span class=\"badge\">up to TLP:{}</span></p>",
+            escape(&t.as_str().to_uppercase())
+        ),
+    };
     let c = |label: &str, n: u64| {
         format!(
             "<div class=\"card\"><div class=\"n\">{n}</div><div class=\"l\">{label}</div></div>"
@@ -199,7 +208,7 @@ pub fn page(p: &Page) -> String {
 <header>
 <h1>{title}</h1>
 <p class="meta">Data as of {generated} UTC &middot; refreshed every {interval}s</p>
-<p><span class="badge">TLP:CLEAR only</span></p>
+{badge}
 {stale}
 </header>
 <div class="grid">
@@ -246,7 +255,7 @@ pub fn page(p: &Page) -> String {
 operator is self-declared and is not verified.</p>
 </section>
 <footer>
-<p>Figures are aggregates over the hub&rsquo;s TLP:CLEAR dataset. Individual IP addresses,
+<p>Figures are aggregates over the hub&rsquo;s dataset. Individual IP addresses,
 prefixes and domains are personal data even at TLP:CLEAR and are therefore never published.
 An observable is active once enough connected nodes of distinct operators report it to meet the
 hub&rsquo;s quorum. Operators are self-declared, so this means &ldquo;reported by several
@@ -373,6 +382,26 @@ mod tests {
         // The empty inline icon is the only href, and it fetches nothing.
         assert_eq!(html.matches("href=").count(), 1);
         assert!(html.contains(r#"<link rel="icon" href="data:,">"#));
+    }
+
+    #[test]
+    fn badge_follows_the_data() {
+        let render_with = |max_tlp| {
+            page(&Page {
+                title: "t",
+                generated: Utc::now(),
+                stale: false,
+                stats: &Stats {
+                    max_tlp,
+                    ..sample()
+                },
+                window_days: 30,
+                interval_secs: 60,
+            })
+        };
+        assert!(render_with(Some(Tlp::Green)).contains("up to TLP:GREEN"));
+        assert!(render_with(Some(Tlp::AmberStrict)).contains("up to TLP:AMBER+STRICT"));
+        assert!(!render_with(None).contains("<span class=\"badge\""));
     }
 
     #[test]

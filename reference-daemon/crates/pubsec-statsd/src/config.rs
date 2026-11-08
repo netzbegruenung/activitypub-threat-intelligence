@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 use serde::Deserialize;
 
-/// pubsec-statsd sits in front of a hub and republishes its TLP:CLEAR dataset
-/// to the public: an aggregate statistics page and machine-readable data
-/// endpoints. Only aggregate numbers are rendered into the page; the data
-/// endpoints serve the same TLP:CLEAR entries the hub's active list and
-/// timeline expose.
+/// pubsec-statsd sits in front of a hub and republishes its dataset to the
+/// public: an aggregate statistics page and machine-readable data endpoints.
+/// Only aggregate numbers are rendered into the page; the data endpoints
+/// serve the same entries the hub's active list and timeline expose, capped
+/// at the poller token's `max_tlp`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

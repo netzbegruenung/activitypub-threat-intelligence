@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use pubsec_core::{Behavior, ObservableType};
+use pubsec_core::{Behavior, ObservableType, Tlp};
 
 use crate::client::{ActiveEntry, NodeInfo, TimelineEntry, TimelineOrigin};
 
@@ -63,6 +63,10 @@ pub struct Stats {
     pub findings_ipv6: usize,
     pub findings_domains: usize,
     pub findings_by_behavior: BehaviorCounts,
+
+    /// Most restrictive TLP present in the data, i.e. how far the poller's
+    /// token cap actually reaches. `None` when there is nothing to show.
+    pub max_tlp: Option<Tlp>,
 }
 
 fn by_behavior<'a>(behaviors: impl Iterator<Item = &'a Behavior>) -> BehaviorCounts {
@@ -138,6 +142,11 @@ impl Stats {
             findings_ipv6: f6,
             findings_domains: fd,
             findings_by_behavior: by_behavior(findings.iter().map(|e| &e.behavior)),
+            max_tlp: active
+                .iter()
+                .map(|e| e.tlp)
+                .chain(findings.iter().map(|e| e.tlp))
+                .max(),
         }
     }
 }
