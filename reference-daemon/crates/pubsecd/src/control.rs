@@ -111,6 +111,7 @@ pub async fn handle(state: &Shared, req: Request, by: &Origin) -> anyhow::Result
             if !publish::unfollow_actor(state, &actor).await? {
                 bail!("not following {actor}");
             }
+            state.recompute.notify_one();
             Reply::Done
         }
         Request::Resync { actor } => {
@@ -184,6 +185,31 @@ pub async fn handle(state: &Shared, req: Request, by: &Origin) -> anyhow::Result
                 .db
                 .call(move |c| db::set_operator_override(c, &actor, operator.as_deref()))
                 .await?;
+            state.recompute.notify_one();
+            Reply::Done
+        }
+        Request::ForgetActor { actor } => {
+            if state.urls.actor == actor {
+                bail!("cannot forget the local actor");
+            }
+            let a = actor.clone();
+            if state
+                .db
+                .call(move |c| db::get_following(c, &a))
+                .await?
+                .is_some()
+            {
+                bail!("still following {actor}; unfollow it first");
+            }
+            let a = actor.clone();
+            if state
+                .db
+                .call(move |c| db::delete_actor_operator(c, &a))
+                .await?
+                == 0
+            {
+                bail!("no operator mapping for {actor}");
+            }
             state.recompute.notify_one();
             Reply::Done
         }

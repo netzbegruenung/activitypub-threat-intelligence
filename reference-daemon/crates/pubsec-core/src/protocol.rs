@@ -54,6 +54,10 @@ pub enum Request {
         actor: String,
         operator: Option<String>,
     },
+    /// Drop the operator mapping of an actor that is no longer followed.
+    ForgetActor {
+        actor: String,
+    },
 
     ListBehaviorPolicies,
     SetBehaviorPolicy {

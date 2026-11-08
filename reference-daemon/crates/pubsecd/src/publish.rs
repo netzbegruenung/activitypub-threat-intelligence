@@ -184,6 +184,11 @@ pub async fn unfollow_actor(state: &AppState, actor: &str) -> anyhow::Result<boo
     let Some(row) = state.db.call(move |c| db::delete_following(c, &a)).await? else {
         return Ok(false);
     };
+    let a = actor.to_string();
+    state
+        .db
+        .call(move |c| db::delete_actor_operator(c, &a))
+        .await?;
     let undo = json!({
         "type": "Undo",
         "id": state.urls.new_activity_id(),

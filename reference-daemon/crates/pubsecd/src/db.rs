@@ -408,6 +408,16 @@ pub fn set_actor_operator(
     Ok(())
 }
 
+/// Forget the discovered and manual operator mapping of an actor.
+pub fn delete_actor_operator(c: &Connection, actor: &str) -> anyhow::Result<usize> {
+    let n = c.execute("DELETE FROM actor_operator WHERE actor = ?1", [actor])?;
+    let m = c.execute(
+        "DELETE FROM actor_operator_override WHERE actor = ?1",
+        [actor],
+    )?;
+    Ok(n + m)
+}
+
 pub fn set_operator_override(
     c: &Connection,
     actor: &str,
@@ -986,9 +996,11 @@ pub fn count_evidence_by_publisher(
         tlp_rank_sql("tlp"),
         tlp_rank_sql("?2")
     );
-    Ok(c.query_row(&sql, rusqlite::params![publisher, max_tlp.as_str()], |r| {
-        r.get::<_, i64>(0)
-    })? as u64)
+    Ok(
+        c.query_row(&sql, rusqlite::params![publisher, max_tlp.as_str()], |r| {
+            r.get::<_, i64>(0)
+        })? as u64,
+    )
 }
 
 /// Delete old records (Section 11). Remote evidence is removed once it can

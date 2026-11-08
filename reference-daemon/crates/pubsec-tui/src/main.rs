@@ -685,6 +685,15 @@ impl App {
             ('d', Some(actor)) => {
                 self.confirm(format!("Unfollow {actor}?"), Request::Unfollow { actor })
             }
+            ('d', None) => {
+                if let SourceRow::Actor { actor, .. } = &row {
+                    let actor = actor.clone();
+                    self.confirm(
+                        format!("Forget {actor}? Removes it from this list."),
+                        Request::ForgetActor { actor },
+                    );
+                }
+            }
             ('s', Some(actor)) => {
                 self.act(
                     Request::Resync { actor },
@@ -1112,7 +1121,7 @@ fn draw(f: &mut Frame, app: &mut App) {
                 "i details  a follow  d unfollow  s resync  t/e trust of its operator  m map to operator"
             }
             Some(SourceRow::Actor { .. }) => {
-                "a follow  t/e trust of its operator  m map to operator"
+                "a follow  d forget  t/e trust of its operator  m map to operator"
             }
             _ => "a follow  t toggle trust  e edit trust/exception  c remove exception/default  m map actor",
         },
@@ -2065,12 +2074,32 @@ mod tests {
                 },
             }
         );
-        // Unfollow only applies to followed actors.
+        // A non-followed actor is forgotten instead of unfollowed.
         app.tab_action('d');
-        assert!(app.modal.is_none());
+        let Some(Modal::Confirm { request, .. }) = app.modal.take() else {
+            panic!("expected confirmation")
+        };
+        assert_eq!(
+            request,
+            Request::ForgetActor {
+                actor: "https://a.example/a2".into()
+            }
+        );
         app.table.select(Some(1));
         app.tab_action('d');
-        assert!(matches!(app.modal, Some(Modal::Confirm { .. })));
+        let Some(Modal::Confirm { request, .. }) = app.modal.take() else {
+            panic!("expected confirmation")
+        };
+        assert_eq!(
+            request,
+            Request::Unfollow {
+                actor: "https://a.example/a1".into()
+            }
+        );
+        // Operator rows have nothing to remove.
+        app.table.select(Some(0));
+        app.tab_action('d');
+        assert!(app.modal.is_none());
         // Trust needs a known operator.
         app.modal = None;
         app.table.select(Some(6));
