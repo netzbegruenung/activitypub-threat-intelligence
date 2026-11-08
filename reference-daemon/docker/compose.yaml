@@ -1,29 +1,29 @@
-# aptid + apti-fail2ban + fail2ban. Images are built locally, nothing is
+# pubsecd + pubsec-fail2ban + fail2ban. Images are built locally, nothing is
 # pulled from or pushed to a registry:
 #
 #   cp .env.example .env            # pick the release tag
-#   cp config/aptid.example.toml config/aptid.toml            # edit
-#   cp config/apti-fail2ban.example.toml config/apti-fail2ban.toml
+#   cp config/pubsecd.example.toml config/pubsecd.toml            # edit
+#   cp config/pubsec-fail2ban.example.toml config/pubsec-fail2ban.toml
 #   docker compose build
-#   docker compose up -d aptid
-#   docker compose exec aptid apti-tui --socket /run/aptid/control.sock   # create tokens
-#   # put the tokens into config/apti-fail2ban.toml, then:
-#   docker compose up -d fail2ban apti-fail2ban
-name: apti
+#   docker compose up -d pubsecd
+#   docker compose exec pubsecd pubsec-tui --socket /run/pubsecd/control.sock   # create tokens
+#   # put the tokens into config/pubsec-fail2ban.toml, then:
+#   docker compose up -d fail2ban pubsec-fail2ban
+name: pubsec
 
 services:
-  aptid:
+  pubsecd:
     build:
       context: .
-      dockerfile: Dockerfile.aptid
+      dockerfile: Dockerfile.pubsecd
       args:
-        APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
-    image: apti/aptid:${APTI_VERSION}
+        PUBSEC_VERSION: ${PUBSEC_VERSION:?set PUBSEC_VERSION in .env}
+    image: pubsec/pubsecd:${PUBSEC_VERSION}
     restart: unless-stopped
     volumes:
-      - ./config/aptid.toml:/etc/aptid/config.toml:ro
-      - aptid-data:/var/lib/aptid
-      - aptid-run:/run/aptid
+      - ./config/pubsecd.toml:/etc/pubsecd/config.toml:ro
+      - pubsecd-data:/var/lib/pubsecd
+      - pubsecd-run:/run/pubsecd
     ports:
       # ActivityPub listener: put a TLS reverse proxy in front (keep Host).
       - "127.0.0.1:8080:8080"
@@ -43,7 +43,7 @@ services:
     build:
       context: ..    # reference-daemon/, for the fail2ban filter
       dockerfile: docker/Dockerfile.fail2ban
-    image: apti/fail2ban:${APTI_VERSION}
+    image: pubsec/fail2ban:${PUBSEC_VERSION}
     restart: unless-stopped
     network_mode: host
     cap_add: [NET_ADMIN, NET_RAW]
@@ -51,33 +51,33 @@ services:
       - ./fail2ban/fail2ban.local:/etc/fail2ban/fail2ban.local:ro
       - ./fail2ban/jail.d:/etc/fail2ban/jail.d:ro
       - f2b-log:/var/log/fail2ban
-      # Ban files written by `apti-fail2ban pull`, followed by the apti jails.
-      - f2b-pull:/var/log/apti-fail2ban:ro
+      # Ban files written by `pubsec-fail2ban pull`, followed by the pubsec jails.
+      - f2b-pull:/var/log/pubsec-fail2ban:ro
       # Logs of other containers: see compose.landscape.example.yaml.
 
-  # The connector: reports fail2ban's bans to aptid and writes the active
+  # The connector: reports fail2ban's bans to pubsecd and writes the active
   # list back out for fail2ban. Unprivileged, no host network.
-  apti-fail2ban:
+  pubsec-fail2ban:
     build:
       context: ..    # reference-daemon/
-      dockerfile: docker/Dockerfile.apti-fail2ban
+      dockerfile: docker/Dockerfile.pubsec-fail2ban
       args:
-        APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
-    image: apti/apti-fail2ban:${APTI_VERSION}
+        PUBSEC_VERSION: ${PUBSEC_VERSION:?set PUBSEC_VERSION in .env}
+    image: pubsec/pubsec-fail2ban:${PUBSEC_VERSION}
     restart: unless-stopped
     depends_on:
-      aptid:
+      pubsecd:
         condition: service_healthy
     volumes:
-      - ./config/apti-fail2ban.toml:/etc/apti-fail2ban/config.toml:ro
-      - f2b-state:/var/lib/apti-fail2ban
-      - f2b-pull:/var/log/apti-fail2ban
+      - ./config/pubsec-fail2ban.toml:/etc/pubsec-fail2ban/config.toml:ro
+      - f2b-state:/var/lib/pubsec-fail2ban
+      - f2b-pull:/var/log/pubsec-fail2ban
       # fail2ban's log, read by `push`.
       - f2b-log:/var/log/fail2ban:ro
 
 volumes:
-  aptid-data:
-  aptid-run:
+  pubsecd-data:
+  pubsecd-run:
   f2b-state:
   f2b-pull:
   f2b-log:

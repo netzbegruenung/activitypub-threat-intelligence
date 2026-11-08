@@ -95,168 +95,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "apti-allowlist"
-version = "2026.10.10"
-dependencies = [
- "anyhow",
- "apti-core",
- "aptid",
- "chrono",
- "clap",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "apti-core"
-version = "2026.10.10"
-dependencies = [
- "chrono",
- "idna",
- "ipnet",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "apti-dashboard"
-version = "2026.10.10"
-dependencies = [
- "anyhow",
- "apti-core",
- "aptid",
- "base64 0.22.1",
- "chrono",
- "clap",
- "ipnet",
- "maxminddb",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "apti-fail2ban"
-version = "2026.10.10"
-dependencies = [
- "anyhow",
- "apti-core",
- "aptid",
- "chrono",
- "clap",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "apti-rspamd"
-version = "2026.10.10"
-dependencies = [
- "anyhow",
- "apti-core",
- "aptid",
- "axum",
- "chrono",
- "clap",
- "httpdate",
- "ipnet",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "apti-statsd"
-version = "2026.10.10"
-dependencies = [
- "anyhow",
- "apti-core",
- "aptid",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "httpdate",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "apti-tui"
-version = "2026.10.10"
-dependencies = [
- "anyhow",
- "apti-core",
- "chrono",
- "clap",
- "crossterm",
- "ratatui",
- "serde_json",
-]
-
-[[package]]
-name = "aptid"
-version = "2026.10.10"
-dependencies = [
- "anyhow",
- "apti-core",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "httpdate",
- "psl",
- "rand 0.8.8",
- "reqwest",
- "rsa",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1425,6 +1263,168 @@ name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
+name = "pubsec-allowlist"
+version = "2026.10.10"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "pubsec-core",
+ "pubsecd",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pubsec-core"
+version = "2026.10.10"
+dependencies = [
+ "chrono",
+ "idna",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "pubsec-dashboard"
+version = "2026.10.10"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "ipnet",
+ "maxminddb",
+ "pubsec-core",
+ "pubsecd",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pubsec-fail2ban"
+version = "2026.10.10"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "pubsec-core",
+ "pubsecd",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pubsec-rspamd"
+version = "2026.10.10"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "httpdate",
+ "ipnet",
+ "pubsec-core",
+ "pubsecd",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pubsec-statsd"
+version = "2026.10.10"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "httpdate",
+ "pubsec-core",
+ "pubsecd",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pubsec-tui"
+version = "2026.10.10"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm",
+ "pubsec-core",
+ "ratatui",
+ "serde_json",
+]
+
+[[package]]
+name = "pubsecd"
+version = "2026.10.10"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "httpdate",
+ "psl",
+ "pubsec-core",
+ "rand 0.8.8",
+ "reqwest",
+ "rsa",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
 
 [[package]]
 name = "quinn"

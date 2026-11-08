@@ -1,0 +1,34 @@
+[Unit]
+Description=AP-TI public statistics page
+Documentation=https://github.com/netzbegruenung/activitypub-threat-intelligence
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pubsec-statsd
+Group=pubsec-statsd
+ExecStart=/usr/bin/pubsec-statsd --config /etc/pubsec-statsd/config.toml run
+Restart=on-failure
+RestartSec=5
+StateDirectory=pubsec-statsd
+StateDirectoryMode=0755
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

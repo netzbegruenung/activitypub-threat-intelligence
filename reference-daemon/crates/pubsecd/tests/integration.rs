@@ -1,0 +1,1722 @@
+//! End-to-end tests: REST API, control socket and federation between two
+//! daemons on localhost.
+
+use std::path::Path;
+use std::time::Duration;
+
+use pubsec_core::policy::OperatorPolicy;
+use pubsec_core::protocol::{
+    AllowlistScope, ApiScope, NewAllowlistEntry, NewApiToken, Reply, Request,
+};
+use pubsec_core::{Behavior, Tlp};
+use pubsecd::config::Config;
+use pubsecd::{api, db, engine, inbox, publish, Daemon};
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, UnixStream};
+
+const PUSH: &str = "push-token-0123456789";
+const READ: &str = "read-token-0123456789";
+const READ_CLEAR: &str = "read-clear-0123456789";
+const ALLOW: &str = "allow-token-0123456789";
+const ADMIN: &str = "admin-token-0123456789";
+
+async fn spawn(dir: &Path, name: &str) -> Daemon {
+    spawn_with(dir, name, "").await
+}
+
+/// Spawn a daemon; `federation` is appended to the `[federation]` table.
+async fn spawn_with(dir: &Path, name: &str, federation: &str) -> Daemon {
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = public.local_addr().unwrap().port();
+    let d = dir.join(name);
+    let cfg = format!(
+        r#"
+[instance]
+base_url = "http://127.0.0.1:{port}"
+organization = "Org {name}"
+[storage]
+database = "{db}"
+key_file = "{key}"
+[public]
+bind = "127.0.0.1:0"
+[api]
+bind = "127.0.0.1:0"
+[control]
+socket = "{sock}"
+[federation]
+allow_http = true
+allow_private_addresses = true
+sync_interval_secs = 3600
+{federation}
+[publish]
+batch_interval_secs = 3600
+[policy]
+recompute_interval_secs = 3600
+allowlist = ["8.8.8.8"]
+"#,
+        db = d.join("db.sqlite").display(),
+        key = d.join("key.pem").display(),
+        sock = d.join("control.sock").display(),
+    );
+    let cfg = Config::parse(&cfg).unwrap();
+    let d = pubsecd::start_with_listeners(cfg, public, api)
+        .await
+        .unwrap();
+    add_token(&d, "push", PUSH, &[ApiScope::Push], Tlp::Green).await;
+    add_token(&d, "read", READ, &[ApiScope::Read], Tlp::Amber).await;
+    add_token(&d, "read-clear", READ_CLEAR, &[ApiScope::Read], Tlp::Clear).await;
+    add_token(&d, "allow", ALLOW, &[ApiScope::Allowlist], Tlp::Green).await;
+    add_token(
+        &d,
+        "admin",
+        ADMIN,
+        &[ApiScope::Allowlist, ApiScope::Publish],
+        Tlp::Green,
+    )
+    .await;
+    d
+}
+
+/// Store a token with a known secret (the control socket only hands out
+/// generated ones).
+async fn add_token(d: &Daemon, name: &str, secret: &str, scopes: &[ApiScope], max_tlp: Tlp) {
+    let (name, hash, scopes) = (name.to_string(), api::hash_token(secret), scopes.to_vec());
+    d.state
+        .db
+        .call(move |c| db::insert_api_token(c, &name, &hash, &scopes, max_tlp))
+        .await
+        .unwrap();
+}
+
+async fn ctl(d: &Daemon, req: Request) -> Reply {
+    let stream = UnixStream::connect(&d.state.cfg.control.socket)
+        .await
+        .unwrap();
+    let (r, mut w) = stream.into_split();
+    let mut line = serde_json::to_vec(&req).unwrap();
+    line.push(b'\n');
+    w.write_all(&line).await.unwrap();
+    let mut lines = BufReader::new(r).lines();
+    let reply = lines.next_line().await.unwrap().unwrap();
+    serde_json::from_str(&reply).unwrap()
+}
+
+async fn ctl_ok(d: &Daemon, req: Request) {
+    match ctl(d, req).await {
+        Reply::Done => {}
+        other => panic!("unexpected reply {other:?}"),
+    }
+}
+
+async fn push(d: &Daemon, token: &str, body: Value) -> (u16, Value) {
+    let r = reqwest::Client::new()
+        .post(format!("http://{}/api/v1/observations", d.api_addr))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    (status, r.json().await.unwrap_or(Value::Null))
+}
+
+async fn active(d: &Daemon, token: &str) -> Vec<Value> {
+    let r: Value = reqwest::Client::new()
+        .get(format!("http://{}/api/v1/active", d.api_addr))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    r["entries"].as_array().cloned().unwrap_or_default()
+}
+
+/// Poll `f` until it returns `Some`, or panic after 20 s.
+async fn wait_for<T, F, Fut>(what: &str, mut f: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    for _ in 0..200 {
+        if let Some(v) = f().await {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+
+    // Authentication and scopes.
+    let (s, _) = push(
+        &d,
+        "wrong-token-0000000000",
+        json!({"value": "45.13.7.9", "behavior": "scan"}),
+    )
+    .await;
+    assert_eq!(s, 401);
+    let (s, _) = push(&d, READ, json!({"value": "45.13.7.9", "behavior": "scan"})).await;
+    assert_eq!(s, 403);
+
+    let (s, r) = push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.9", "behavior": "ssh-bruteforce", "port": 22, "service": "ssh", "count": 12},
+            {"value": "10.0.0.1", "behavior": "scan"},
+            {"value": "8.8.8.8", "behavior": "scan"},
+            {"value": "45.13.7.9", "behavior": "bogus"},
+            {"value": "Evil-Domain.COM.", "behavior": "phishing"}
+        ]),
+    )
+    .await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(r["accepted"], 2, "{r}");
+    let errors: Vec<&str> = r["rejected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["error"].as_str().unwrap())
+        .collect();
+    assert_eq!(errors.len(), 3);
+    assert!(errors.iter().any(|e| e.contains("special-purpose")));
+    assert!(errors.iter().any(|e| e.contains("allowlisted")));
+
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 2);
+    engine::recompute(&d.state).await.unwrap();
+
+    // Local weight (2) meets k (2): our own Sightings activate.
+    let list = active(&d, READ).await;
+    assert_eq!(list.len(), 2, "{list:?}");
+    let ssh = list
+        .iter()
+        .find(|e| e["observableValue"] == "45.13.7.9")
+        .unwrap();
+    assert_eq!(ssh["behavior"], "ssh-bruteforce");
+    assert_eq!(ssh["tlp"], "green");
+    assert_eq!(ssh["ports"], json!([22]));
+    assert!(ssh["ttl"].as_i64().unwrap() > 23 * 3600);
+    assert!(list
+        .iter()
+        .any(|e| e["observableValue"] == "evil-domain.com"));
+    // TLP is preserved: a CLEAR-only client gets nothing.
+    assert!(active(&d, READ_CLEAR).await.is_empty());
+
+    // activeObjects requires signed fetch.
+    let r = reqwest::get(format!("{}/actor/active?page=true", d.state.urls.base))
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    // Actor and WebFinger are public.
+    let wf: Value = reqwest::get(format!(
+        "{}/.well-known/webfinger?resource=acct:feed@127.0.0.1:{}",
+        d.state.urls.base,
+        d.public_addr.port()
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(wf["links"][0]["href"], d.state.urls.actor);
+    let org: Value = reqwest::get(&d.state.urls.org)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(org["operatedActors"], json!([d.state.urls.actor]));
+
+    // Control socket.
+    let Reply::Status(st) = ctl(&d, Request::Status).await else {
+        panic!()
+    };
+    assert_eq!(st.active, 2);
+    let Reply::Lookup(l) = ctl(
+        &d,
+        Request::Lookup {
+            value: "45.13.7.9".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(l.evidence.len(), 1);
+    assert_eq!(l.assessments.len(), 1);
+    assert!(l.assessments[0].active);
+
+    // Behaviour policy: k = off disables Sighting activation.
+    ctl_ok(
+        &d,
+        Request::SetBehaviorPolicy {
+            behavior: Behavior::Phishing,
+            overrides: pubsec_core::policy::BehaviorOverride {
+                k: Some(pubsec_core::policy::Threshold::Off),
+                ..Default::default()
+            },
+            default_tlp: Some(Tlp::Amber),
+        },
+    )
+    .await;
+    ctl_ok(&d, Request::Recompute).await;
+    assert_eq!(active(&d, READ).await.len(), 1);
+
+    // Local allowlist suspends.
+    ctl_ok(
+        &d,
+        Request::AddAllowlist(NewAllowlistEntry {
+            scope: AllowlistScope::Local,
+            value: "45.13.7.0/24".into(),
+            behaviors: vec![],
+            tlp: None,
+            valid_until: None,
+            summary: Some("test".into()),
+            source: None,
+        }),
+    )
+    .await;
+    ctl_ok(&d, Request::Recompute).await;
+    assert!(active(&d, READ).await.is_empty());
+
+    // Invalid input is reported, not fatal.
+    assert!(matches!(
+        ctl(
+            &d,
+            Request::Lookup {
+                value: "not a value".into()
+            }
+        )
+        .await,
+        Reply::Error(_)
+    ));
+    d.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn observation_tlp() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let lookup = |value: &str| {
+        let req = Request::Lookup {
+            value: value.into(),
+        };
+        let d = &d;
+        async move {
+            let Reply::Lookup(l) = ctl(d, req).await else {
+                panic!()
+            };
+            l.evidence
+                .iter()
+                .map(|e| e.tlp)
+                .collect::<std::collections::BTreeSet<_>>()
+        }
+    };
+
+    // The requested TLP replaces the behaviour default (green); RED is
+    // never accepted.
+    let (s, r) = push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.20", "behavior": "smtp-spam", "tlp": "clear"},
+            {"value": "45.13.7.21", "behavior": "smtp-spam"},
+            {"value": "45.13.7.22", "behavior": "smtp-spam", "tlp": "red"}
+        ]),
+    )
+    .await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(r["accepted"], 2, "{r}");
+    assert!(r["rejected"][0]["error"].as_str().unwrap().contains("RED"));
+    publish::run_batch(&d.state).await.unwrap();
+    engine::recompute(&d.state).await.unwrap();
+    let clear = active(&d, READ_CLEAR).await;
+    assert_eq!(clear.len(), 1, "{clear:?}");
+    assert_eq!(clear[0]["observableValue"], "45.13.7.20");
+    assert_eq!(clear[0]["tlp"], "clear");
+
+    // Within one batch the most restrictive request wins.
+    push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.23", "behavior": "smtp-spam", "tlp": "amber"},
+            {"value": "45.13.7.23", "behavior": "smtp-spam", "tlp": "clear"}
+        ]),
+    )
+    .await;
+    // A stricter TLP than the published Sighting's starts a new Sighting;
+    // a less strict one keeps the existing Sighting and its TLP.
+    push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.20", "behavior": "smtp-spam", "tlp": "amber"},
+            {"value": "45.13.7.21", "behavior": "smtp-spam", "tlp": "clear"}
+        ]),
+    )
+    .await;
+    publish::run_batch(&d.state).await.unwrap();
+    engine::recompute(&d.state).await.unwrap();
+    assert_eq!(lookup("45.13.7.23").await, [Tlp::Amber].into());
+    assert_eq!(lookup("45.13.7.20").await, [Tlp::Clear, Tlp::Amber].into());
+    assert_eq!(lookup("45.13.7.21").await, [Tlp::Green].into());
+    // The active entry carries the most restrictive supporting TLP.
+    let list = active(&d, READ).await;
+    let tlp_of = |v: &str| {
+        list.iter()
+            .find(|e| e["observableValue"] == v)
+            .map(|e| e["tlp"].clone())
+    };
+    assert_eq!(tlp_of("45.13.7.20"), Some(json!("amber")));
+    assert_eq!(tlp_of("45.13.7.21"), Some(json!("green")));
+    assert!(active(&d, READ_CLEAR).await.is_empty());
+
+    // A push without a TLP means the behaviour's TLP (green), not the least
+    // restrictive one: merged with a CLEAR request in the same batch, green
+    // wins; against a published CLEAR Sighting, it starts a new Sighting.
+    push(
+        &d,
+        PUSH,
+        json!([
+            {"value": "45.13.7.24", "behavior": "smtp-spam"},
+            {"value": "45.13.7.24", "behavior": "smtp-spam", "tlp": "clear"},
+            {"value": "45.13.7.25", "behavior": "smtp-spam", "tlp": "clear"}
+        ]),
+    )
+    .await;
+    publish::run_batch(&d.state).await.unwrap();
+    push(
+        &d,
+        PUSH,
+        json!({"value": "45.13.7.25", "behavior": "smtp-spam"}),
+    )
+    .await;
+    publish::run_batch(&d.state).await.unwrap();
+    assert_eq!(lookup("45.13.7.24").await, [Tlp::Green].into());
+    assert_eq!(lookup("45.13.7.25").await, [Tlp::Clear, Tlp::Green].into());
+    d.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn federation_between_two_daemons() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = spawn(dir.path(), "a").await;
+    let b = spawn(dir.path(), "b").await;
+    let a_actor = a.state.urls.actor.clone();
+    let b_actor = b.state.urls.actor.clone();
+    let a_org = a.state.urls.org.clone();
+
+    // A publishes a GREEN Sighting before B follows.
+    push(
+        &a,
+        PUSH,
+        json!({"value": "45.13.7.9", "behavior": "ssh-bruteforce", "port": 22}),
+    )
+    .await;
+    publish::run_batch(&a.state).await.unwrap();
+
+    // B follows A via WebFinger; A requires approval.
+    ctl_ok(
+        &b,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", a.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("follow request at A", || async {
+        match ctl(&a, Request::ListFollowers).await {
+            Reply::Followers(f) => f
+                .iter()
+                .any(|f| f.actor == b_actor && f.state == "pending")
+                .then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    ctl_ok(
+        &a,
+        Request::ApproveFollower {
+            actor: b_actor.clone(),
+        },
+    )
+    .await;
+    wait_for("accepted follow at B", || async {
+        match ctl(&b, Request::ListFollowing).await {
+            Reply::Following(f) => f
+                .iter()
+                .any(|f| f.actor == a_actor && f.state == "accepted")
+                .then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+
+    // After Accept, B re-reads activeObjects and now sees the GREEN Sighting.
+    wait_for("synced sighting at B", || async {
+        match ctl(
+            &b,
+            Request::Lookup {
+                value: "45.13.7.9".into(),
+            },
+        )
+        .await
+        {
+            Reply::Lookup(l) => (!l.evidence.is_empty()).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+
+    // A's operator link is verified at B.
+    let Reply::Operators(ops) = ctl(&b, Request::ListOperators).await else {
+        panic!()
+    };
+    let op = ops
+        .iter()
+        .find(|o| o.id == a_org)
+        .expect("A's operator known at B");
+    assert_eq!(op.source, "verified");
+    assert!(op.actors.contains(&a_actor));
+
+    // Untrusted by default: nothing is active, item queued for review.
+    ctl_ok(&b, Request::Recompute).await;
+    assert!(active(&b, READ).await.is_empty());
+    let Reply::Review(items) = ctl(
+        &b,
+        Request::ListReview {
+            include_resolved: false,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(items
+        .iter()
+        .any(|i| i.kind == "untrusted" && i.observable_value == "45.13.7.9"));
+
+    // Trust A with weight 2 (= k): A alone activates.
+    ctl_ok(
+        &b,
+        Request::SetOperatorPolicy {
+            operator: a_org.clone(),
+            behavior: None,
+            policy: OperatorPolicy {
+                trusted: true,
+                weight: 2.0,
+            },
+        },
+    )
+    .await;
+    ctl_ok(&b, Request::Recompute).await;
+    let list = active(&b, READ).await;
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0]["observableValue"], "45.13.7.9");
+
+    // New observations are pushed to B's inbox (Create, then Update).
+    push(
+        &a,
+        PUSH,
+        json!({"value": "2a01:4f8:1::/48", "behavior": "scan"}),
+    )
+    .await;
+    publish::run_batch(&a.state).await.unwrap();
+    wait_for("delivered sighting at B", || async {
+        match ctl(
+            &b,
+            Request::Lookup {
+                value: "2a01:4f8:1::/48".into(),
+            },
+        )
+        .await
+        {
+            Reply::Lookup(l) => (!l.evidence.is_empty()).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    push(
+        &a,
+        PUSH,
+        json!({"value": "2a01:4f8:1::/48", "behavior": "scan", "count": 5}),
+    )
+    .await;
+    publish::run_batch(&a.state).await.unwrap();
+    wait_for("updated sighting at B", || async {
+        match ctl(
+            &b,
+            Request::Lookup {
+                value: "2a01:4f8:1::/48".into(),
+            },
+        )
+        .await
+        {
+            Reply::Lookup(l) => l
+                .evidence
+                .iter()
+                .any(|e| e.detail.contains("count 6"))
+                .then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+
+    // A publishes an allowlist entry; B (trusting A) suspends.
+    ctl_ok(
+        &a,
+        Request::AddAllowlist(NewAllowlistEntry {
+            scope: AllowlistScope::Published,
+            value: "45.13.7.9".into(),
+            behaviors: vec![],
+            tlp: Some(Tlp::Green),
+            valid_until: None,
+            summary: Some("false positive".into()),
+            source: None,
+        }),
+    )
+    .await;
+    wait_for("allowlist suspension at B", || async {
+        publish::run_batch(&a.state).await.unwrap();
+        ctl_ok(&b, Request::Recompute).await;
+        active(&b, READ)
+            .await
+            .iter()
+            .all(|e| e["observableValue"] != "45.13.7.9")
+            .then_some(())
+    })
+    .await;
+
+    // Withdrawing the entry (Delete) re-activates.
+    let Reply::Allowlist(entries) = ctl(&a, Request::ListAllowlist).await else {
+        panic!()
+    };
+    ctl_ok(&a, Request::RemoveAllowlist { id: entries[0].id }).await;
+    wait_for("re-activation at B", || async {
+        publish::run_batch(&a.state).await.unwrap();
+        ctl_ok(&b, Request::Recompute).await;
+        active(&b, READ)
+            .await
+            .iter()
+            .any(|e| e["observableValue"] == "45.13.7.9")
+            .then_some(())
+    })
+    .await;
+
+    // A resync also refreshes the cached actor document, e.g. its summary.
+    let following_summary = || async {
+        let Reply::Following(f) = ctl(&b, Request::ListFollowing).await else {
+            panic!("expected following");
+        };
+        f.into_iter().find(|f| f.actor == a_actor).unwrap().summary
+    };
+    assert_eq!(
+        following_summary().await.as_deref(),
+        Some("AP-TI threat intelligence feed operated by Org a.")
+    );
+    let id = a_actor.clone();
+    b.state
+        .db
+        .call(move |c| {
+            let mut cached = db::get_remote_actor(c, &id)?.unwrap();
+            cached.summary = Some("stale".into());
+            db::upsert_remote_actor(c, &cached)
+        })
+        .await
+        .unwrap();
+    assert_eq!(following_summary().await.as_deref(), Some("stale"));
+    ctl_ok(
+        &b,
+        Request::Resync {
+            actor: a_actor.clone(),
+        },
+    )
+    .await;
+    assert_eq!(
+        following_summary().await.as_deref(),
+        Some("AP-TI threat intelligence feed operated by Org a.")
+    );
+
+    // Unfollow is delivered as Undo.
+    ctl_ok(
+        &b,
+        Request::Unfollow {
+            actor: a_actor.clone(),
+        },
+    )
+    .await;
+    wait_for("follower removed at A", || async {
+        match ctl(&a, Request::ListFollowers).await {
+            Reply::Followers(f) => f.iter().all(|f| f.actor != b_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+
+    a.shutdown();
+    b.shutdown();
+}
+
+async fn api(
+    d: &Daemon,
+    method: reqwest::Method,
+    path: &str,
+    token: &str,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let mut req = reqwest::Client::new()
+        .request(method, format!("http://{}{path}", d.api_addr))
+        .bearer_auth(token);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.unwrap();
+    let status = r.status().as_u16();
+    (status, r.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rest_allowlist() {
+    use reqwest::Method;
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+
+    push(&d, PUSH, json!({"value": "45.13.7.9", "behavior": "scan"})).await;
+    publish::run_batch(&d.state).await.unwrap();
+    engine::recompute(&d.state).await.unwrap();
+    assert_eq!(active(&d, READ).await.len(), 1);
+
+    // Scope checks.
+    let body = json!({"value": "45.13.7.0/24", "summary": "our scanner"});
+    let (s, _) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        READ,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(s, 403);
+    let (s, _) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ALLOW,
+        Some(json!({"value": "45.13.7.9", "scope": "published"})),
+    )
+    .await;
+    assert_eq!(s, 403, "published requires publish scope");
+    let (s, _) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ALLOW,
+        Some(json!({"value": "nonsense value"})),
+    )
+    .await;
+    assert_eq!(s, 400);
+    let (s, _) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ALLOW,
+        Some(json!({"value": "1.2.3.4", "behaviors": ["bogus"]})),
+    )
+    .await;
+    assert_eq!(s, 400);
+
+    // Create, idempotent repeat, list, get.
+    let (s, e) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ALLOW,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(s, 201, "{e}");
+    assert_eq!(e["observableValue"], "45.13.7.0/24");
+    assert_eq!(e["scope"], "local");
+    let id = e["id"].as_i64().unwrap();
+    let (s, e2) = api(&d, Method::POST, "/api/v1/allowlist", ALLOW, Some(body)).await;
+    assert_eq!(s, 200);
+    assert_eq!(e2["id"].as_i64(), Some(id));
+    let (s, list) = api(&d, Method::GET, "/api/v1/allowlist?scope=local", READ, None).await;
+    assert_eq!(s, 200);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    let (s, _) = api(
+        &d,
+        Method::GET,
+        &format!("/api/v1/allowlist/{id}"),
+        ALLOW,
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+
+    // Allowlisted: suspended, and further pushes are rejected.
+    engine::recompute(&d.state).await.unwrap();
+    assert!(active(&d, READ).await.is_empty());
+    let (_, r) = push(&d, PUSH, json!({"value": "45.13.7.10", "behavior": "scan"})).await;
+    assert_eq!(r["accepted"], 0);
+
+    // Published entry creates a local Opinion; deleting it withdraws it.
+    let (s, p) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ADMIN,
+        Some(json!({"value": "45.13.8.1", "scope": "published", "tlp": "green", "behaviors": ["scan"],
+                    "summary": "our scanner", "source": "sync-tool:/etc/x"})),
+    )
+    .await;
+    assert_eq!(s, 201, "{p}");
+    let object_id = p["objectId"].as_str().unwrap().to_string();
+    assert!(p["validUntil"].is_string());
+    assert_eq!(p["source"], "sync-tool:/etc/x");
+    let pid = p["id"].as_i64().unwrap();
+    let last_activity = || async {
+        d.state
+            .db
+            .call(|c| pubsecd::db::recent_activities(c, 1))
+            .await
+            .unwrap()
+            .pop()
+            .map(|a| a.json)
+            .unwrap_or_default()
+    };
+    // The Create is sent with the next batch; the source is not published.
+    assert_ne!(
+        last_activity().await["object"]["id"].as_str(),
+        Some(object_id.as_str())
+    );
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 1);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Create");
+    assert_eq!(act["object"]["id"].as_str(), Some(object_id.as_str()));
+    assert_eq!(act["object"]["summary"], "our scanner");
+    assert!(!act.to_string().contains("sync-tool"), "{act}");
+
+    // A later validUntil extends the entry and sends an Update of the Opinion.
+    let later = "2099-01-01T00:00:00Z";
+    let (s, x) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ADMIN,
+        Some(
+            json!({"value": "45.13.8.1", "scope": "published", "tlp": "green",
+                    "behaviors": ["scan"], "validUntil": later}),
+        ),
+    )
+    .await;
+    assert_eq!(s, 200, "{x}");
+    assert_eq!(x["id"].as_i64(), Some(pid));
+    assert_eq!(x["objectId"].as_str(), Some(object_id.as_str()));
+    assert_eq!(x["validUntil"], "2099-01-01T00:00:00Z");
+    let oid = object_id.clone();
+    let ev = d
+        .state
+        .db
+        .call(move |c| pubsecd::db::get_evidence(c, &oid))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ev.object.valid_until.map(|t| t.to_rfc3339()),
+        Some("2099-01-01T00:00:00+00:00".into())
+    );
+    assert!(ev.object.updated.is_some());
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 1);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Update");
+    assert_eq!(act["object"]["id"].as_str(), Some(object_id.as_str()));
+    assert_eq!(act["object"]["validUntil"], later);
+    // An earlier validUntil changes nothing.
+    let (s, x) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ADMIN,
+        Some(
+            json!({"value": "45.13.8.1", "scope": "published", "tlp": "green",
+                    "behaviors": ["scan"], "validUntil": "2098-01-01T00:00:00Z"}),
+        ),
+    )
+    .await;
+    assert_eq!((s, x["validUntil"].as_str()), (200, Some(later)));
+
+    // Another TLP is another entry.
+    let (s, c) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ADMIN,
+        Some(json!({"value": "45.13.8.1", "scope": "published", "tlp": "clear", "behaviors": ["scan"]})),
+    )
+    .await;
+    assert_eq!(s, 201, "{c}");
+    assert_ne!(c["id"].as_i64(), Some(pid));
+    let (s, _) = api(
+        &d,
+        Method::DELETE,
+        &format!("/api/v1/allowlist/{}", c["id"]),
+        ADMIN,
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    // Created and withdrawn within one interval: only the Delete is sent.
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 1);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Delete");
+    assert_eq!(act["object"], c["objectId"]);
+
+    // Several entries in one interval share one activity.
+    let mut ids = vec![];
+    for v in ["45.13.9.1", "45.13.9.2", "45.13.9.3"] {
+        let (s, e) = api(
+            &d,
+            Method::POST,
+            "/api/v1/allowlist",
+            ADMIN,
+            Some(json!({"value": v, "scope": "published", "tlp": "green"})),
+        )
+        .await;
+        assert_eq!(s, 201, "{e}");
+        ids.push(e["id"].as_i64().unwrap());
+    }
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 3);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Create");
+    assert_eq!(act["object"].as_array().map(Vec::len), Some(3), "{act}");
+    for id in ids {
+        let (s, _) = api(
+            &d,
+            Method::DELETE,
+            &format!("/api/v1/allowlist/{id}"),
+            ADMIN,
+            None,
+        )
+        .await;
+        assert_eq!(s, 200);
+    }
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 3);
+    let act = last_activity().await;
+    assert_eq!(act["type"], "Delete");
+    assert_eq!(act["object"].as_array().map(Vec::len), Some(3), "{act}");
+    assert_eq!(publish::run_batch(&d.state).await.unwrap(), 0);
+    let (s, _) = api(
+        &d,
+        Method::DELETE,
+        &format!("/api/v1/allowlist/{pid}"),
+        ALLOW,
+        None,
+    )
+    .await;
+    assert_eq!(s, 403, "removing a published entry requires publish scope");
+    let (s, _) = api(
+        &d,
+        Method::DELETE,
+        &format!("/api/v1/allowlist/{pid}"),
+        ADMIN,
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let ev = d
+        .state
+        .db
+        .call(move |c| pubsecd::db::get_evidence(c, &object_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ev.deleted.is_some());
+
+    // Delete the local entry: active again.
+    let (s, _) = api(
+        &d,
+        Method::DELETE,
+        &format!("/api/v1/allowlist/{id}"),
+        ALLOW,
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = api(
+        &d,
+        Method::DELETE,
+        &format!("/api/v1/allowlist/{id}"),
+        ALLOW,
+        None,
+    )
+    .await;
+    assert_eq!(s, 404);
+    engine::recompute(&d.state).await.unwrap();
+    assert_eq!(active(&d, READ).await.len(), 1);
+    d.shutdown();
+}
+
+/// Remote input that used to crash the engine or exhaust resources.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hostile_remote_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn_with(dir.path(), "a", "max_evidence_per_publisher = 2").await;
+    let peer = "https://peer.example.org/actor";
+    let now = chrono::Utc::now();
+    let earlier = db::ts(now - chrono::TimeDelta::minutes(1));
+    let sighting = |i: u8| {
+        json!({
+            "type": "Sighting", "id": format!("https://peer.example.org/s/{i}"),
+            "attributedTo": peer, "published": earlier,
+            "observableType": "ipv4-addr", "observableValue": format!("45.13.7.{i}"),
+            "observedBehavior": "scan", "firstSeen": earlier, "lastSeen": earlier,
+            "count": 1, "tlp": "clear"
+        })
+    };
+
+    // Per-publisher quota: new objects beyond it are dropped, updates of
+    // known objects are still accepted.
+    let r = inbox::ingest_objects(&d.state, peer, (1..=3).map(sighting).collect(), false)
+        .await
+        .unwrap();
+    assert_eq!((r.stored, r.ignored), (2, 1), "{r:?}");
+    let mut update = sighting(1);
+    update["updated"] = json!(db::ts(now));
+    let r = inbox::ingest_objects(&d.state, peer, vec![update], true)
+        .await
+        .unwrap();
+    assert_eq!(r.stored, 1, "{r:?}");
+
+    // Extended-year timestamps are rejected on ingest ...
+    let extreme = json!({
+        "type": "ThreatIndicator", "id": "https://peer.example.org/i/1",
+        "attributedTo": peer, "published": "+262142-12-31T00:00:00Z",
+        "observableType": "ipv4-addr", "observableValue": "45.13.7.1",
+        "observedBehavior": "scan", "validFrom": "2026-01-01T00:00:00Z",
+        "validUntil": "+262142-12-31T23:00:00Z", "tlp": "clear"
+    });
+    let r = inbox::ingest_objects(&d.state, peer, vec![extreme.clone()], false)
+        .await
+        .unwrap();
+    assert_eq!(r.invalid, 1, "{r:?}");
+    // ... and objects stored before that check do not crash the engine.
+    let o: pubsec_core::EvidenceObject = serde_json::from_value(extreme).unwrap();
+    d.state
+        .db
+        .call(move |c| db::upsert_evidence(c, &o, false, &[], None))
+        .await
+        .unwrap();
+    engine::recompute(&d.state).await.unwrap();
+
+    // Control characters in remote strings are rejected.
+    let mut evil = sighting(2);
+    evil["summary"] = json!("\u{1b}]52;c;cm0gLXJmIH4=\u{7}");
+    evil["updated"] = json!(db::ts(now));
+    let r = inbox::ingest_objects(&d.state, peer, vec![evil], true)
+        .await
+        .unwrap();
+    assert_eq!(r.invalid, 1, "{r:?}");
+    d.shutdown();
+}
+
+/// A Sighting must not be less restrictive than the indicators it
+/// references (Section 4.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn indicator_refs_tlp() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let peer = "https://peer.example.org/actor";
+    let now = chrono::Utc::now();
+    let earlier = db::ts(now - chrono::TimeDelta::minutes(1));
+    let later = db::ts(now + chrono::TimeDelta::days(1));
+    let indicator = json!({
+        "type": "ThreatIndicator", "id": "https://peer.example.org/i/1",
+        "attributedTo": peer, "published": earlier,
+        "observableType": "ipv4-addr", "observableValue": "45.13.7.1",
+        "observedBehavior": "scan", "validFrom": earlier, "validUntil": later,
+        "tlp": "amber"
+    });
+    let sighting = |id: &str, tlp: &str| {
+        json!({
+            "type": "Sighting", "id": format!("https://peer.example.org/s/{id}"),
+            "attributedTo": peer, "published": earlier,
+            "observableType": "ipv4-addr", "observableValue": "45.13.7.1",
+            "observedBehavior": "scan", "firstSeen": earlier, "lastSeen": earlier,
+            "count": 1, "tlp": tlp, "indicatorRefs": ["https://peer.example.org/i/1"]
+        })
+    };
+    let r = inbox::ingest_objects(
+        &d.state,
+        peer,
+        vec![
+            indicator,
+            sighting("1", "green"),
+            sighting("2", "amber"),
+            sighting("3", "amber+strict"),
+        ],
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.stored, r.invalid), (3, 1), "{r:?}");
+    d.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn token_management() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let obs = json!({"value": "45.13.7.9", "behavior": "scan"});
+
+    let Reply::TokenCreated { token, secret } = ctl(
+        &d,
+        Request::CreateToken(NewApiToken {
+            name: "sensor".into(),
+            scopes: vec![ApiScope::Push, ApiScope::Push],
+            max_tlp: Tlp::Green,
+        }),
+    )
+    .await
+    else {
+        panic!("expected TokenCreated")
+    };
+    assert_eq!(token.scopes, vec![ApiScope::Push]);
+    assert_eq!(push(&d, &secret, obs.clone()).await.0, 200);
+
+    // Only the SHA-512 hash is stored.
+    let (stored, last_used) = d
+        .state
+        .db
+        .call(|c| {
+            Ok(c.query_row(
+                "SELECT hash, last_used FROM api_tokens WHERE name = 'sensor'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored, api::hash_token(&secret));
+    assert_ne!(stored, secret);
+    assert!(last_used.is_some());
+
+    // Invalid input is rejected.
+    for (name, scopes) in [
+        ("sensor", vec![ApiScope::Read]),
+        ("bad name", vec![ApiScope::Read]),
+        ("x", vec![]),
+    ] {
+        let r = ctl(
+            &d,
+            Request::CreateToken(NewApiToken {
+                name: name.into(),
+                scopes,
+                max_tlp: Tlp::Green,
+            }),
+        )
+        .await;
+        assert!(matches!(r, Reply::Error(_)), "{name}: {r:?}");
+    }
+
+    // Scope changes apply immediately.
+    ctl_ok(
+        &d,
+        Request::UpdateToken {
+            id: token.id,
+            scopes: vec![ApiScope::Read],
+            max_tlp: Tlp::Clear,
+        },
+    )
+    .await;
+    assert_eq!(push(&d, &secret, obs.clone()).await.0, 403);
+
+    // Rotation invalidates the old secret.
+    ctl_ok(
+        &d,
+        Request::UpdateToken {
+            id: token.id,
+            scopes: vec![ApiScope::Push],
+            max_tlp: Tlp::Clear,
+        },
+    )
+    .await;
+    let Reply::TokenCreated { secret: new, .. } =
+        ctl(&d, Request::RotateToken { id: token.id }).await
+    else {
+        panic!("expected TokenCreated")
+    };
+    assert_ne!(new, secret);
+    assert_eq!(push(&d, &secret, obs.clone()).await.0, 401);
+    assert_eq!(push(&d, &new, obs.clone()).await.0, 200);
+
+    let Reply::Tokens(list) = ctl(&d, Request::ListTokens).await else {
+        panic!("expected Tokens")
+    };
+    assert!(list.iter().any(|t| t.name == "sensor"));
+    assert_eq!(list.len(), 6);
+
+    ctl_ok(&d, Request::DeleteToken { id: token.id }).await;
+    assert_eq!(push(&d, &new, obs).await.0, 401);
+    d.shutdown();
+}
+
+async fn timeline(d: &Daemon, token: &str, query: &str) -> (u16, Value) {
+    let r = reqwest::Client::new()
+        .get(format!("http://{}/api/v1/timeline{query}", d.api_addr))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    (status, r.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rest_timeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let peer = "https://peer.example.org/actor";
+    let now = chrono::Utc::now();
+    let days_ago = |n: i64| db::ts(now - chrono::TimeDelta::days(n));
+
+    let (s, _) = timeline(&d, "wrong-token-0000000000", "").await;
+    assert_eq!(s, 401);
+    let (s, _) = timeline(&d, PUSH, "").await;
+    assert_eq!(s, 403);
+    let (s, _) = timeline(&d, READ, "?behavior=bogus").await;
+    assert_eq!(s, 400);
+    let (s, _) = timeline(
+        &d,
+        READ,
+        &format!("?since={}&until={}", days_ago(1), days_ago(2)),
+    )
+    .await;
+    assert_eq!(s, 400);
+
+    // Local: only published Sightings appear.
+    push(
+        &d,
+        PUSH,
+        json!({"value": "45.13.7.9", "behavior": "ssh-bruteforce", "seenAt": days_ago(3), "count": 4}),
+    )
+    .await;
+    let (_, t) = timeline(&d, READ, "").await;
+    assert!(t["entries"].as_array().unwrap().is_empty(), "{t}");
+    publish::run_batch(&d.state).await.unwrap();
+
+    // Federated: an old Sighting, an indicator with two behaviours, a
+    // revoked indicator and an AMBER Sighting.
+    let objects = vec![
+        json!({
+            "type": "Sighting", "id": "https://peer.example.org/s/1",
+            "attributedTo": peer, "published": days_ago(5),
+            "observableType": "ipv4-addr", "observableValue": "45.13.7.1",
+            "observedBehavior": "scan", "firstSeen": days_ago(6), "lastSeen": days_ago(5),
+            "count": 2, "tlp": "clear"
+        }),
+        json!({
+            "type": "ThreatIndicator", "id": "https://peer.example.org/i/1",
+            "attributedTo": peer, "published": days_ago(1),
+            "observableType": "ipv6-addr", "observableValue": "2a01:4f8:1::/48",
+            "observedBehavior": ["scan", "exploit-attempt"],
+            "validFrom": days_ago(1), "validUntil": db::ts(now + chrono::TimeDelta::days(1)),
+            "tlp": "green"
+        }),
+        json!({
+            "type": "ThreatIndicator", "id": "https://peer.example.org/i/2",
+            "attributedTo": peer, "published": days_ago(1),
+            "observableType": "ipv4-addr", "observableValue": "45.13.7.2",
+            "observedBehavior": "scan", "revoked": true,
+            "validFrom": days_ago(1), "validUntil": db::ts(now + chrono::TimeDelta::days(1)),
+            "tlp": "clear"
+        }),
+        json!({
+            "type": "Sighting", "id": "https://peer.example.org/s/2",
+            "attributedTo": peer, "published": days_ago(1),
+            "observableType": "domain-name", "observableValue": "evil-domain.com",
+            "observedBehavior": "phishing", "firstSeen": days_ago(1), "lastSeen": days_ago(1),
+            "count": 1, "tlp": "amber"
+        }),
+    ];
+    let r = inbox::ingest_objects(&d.state, peer, objects, false)
+        .await
+        .unwrap();
+    assert_eq!(r.stored, 4, "{r:?}");
+
+    let (s, t) = timeline(&d, READ, "").await;
+    assert_eq!(s, 200, "{t}");
+    let entries = t["entries"].as_array().unwrap();
+    let summary: Vec<(&str, &str, &str)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["observableValue"].as_str().unwrap(),
+                e["behavior"].as_str().unwrap(),
+                e["origin"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // Sorted by start.
+    assert_eq!(
+        summary,
+        [
+            ("45.13.7.1", "scan", "federated"),
+            ("45.13.7.9", "ssh-bruteforce", "local"),
+            ("2a01:4f8:1::/48", "scan", "federated"),
+            ("2a01:4f8:1::/48", "exploit-attempt", "federated"),
+            ("evil-domain.com", "phishing", "federated"),
+        ],
+        "{t}"
+    );
+    let local = &entries[1];
+    assert_eq!(local["actor"], d.state.urls.actor);
+    assert_eq!(entries[0]["actor"], peer);
+    // Actor details: our own from the config; the peer was never fetched.
+    let own = &t["actors"][&d.state.urls.actor];
+    assert_eq!(own["name"], "Org a");
+    assert_eq!(own["handle"], "feed@127.0.0.1");
+    assert_eq!(t["actors"][peer], json!({}));
+    assert_eq!(t["actors"].as_object().unwrap().len(), 2);
+    assert_eq!(local["kind"], "Sighting");
+    assert_eq!(local["count"], 4);
+    assert_eq!(local["start"], local["end"]);
+    assert_eq!(entries[2]["kind"], "ThreatIndicator");
+    assert!(entries[2].get("count").is_none());
+
+    // TLP, window and filters.
+    let (_, t) = timeline(&d, READ_CLEAR, "").await;
+    let values: Vec<&str> = t["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["observableValue"].as_str().unwrap())
+        .collect();
+    assert_eq!(values, ["45.13.7.1"]);
+    let (_, t) = timeline(&d, READ, &format!("?since={}", days_ago(4))).await;
+    assert_eq!(t["entries"].as_array().unwrap().len(), 4, "{t}");
+    let (_, t) = timeline(&d, READ, &format!("?until={}", days_ago(4))).await;
+    assert_eq!(t["entries"].as_array().unwrap().len(), 1, "{t}");
+    let (_, t) = timeline(&d, READ, "?behavior=scan&type=ipv6-addr").await;
+    assert_eq!(t["entries"].as_array().unwrap().len(), 1, "{t}");
+
+    // Locally allowlisted observables are left out.
+    ctl_ok(
+        &d,
+        Request::AddAllowlist(NewAllowlistEntry {
+            scope: AllowlistScope::Local,
+            value: "2a01:4f8::/32".into(),
+            behaviors: vec![],
+            tlp: None,
+            valid_until: None,
+            summary: None,
+            source: None,
+        }),
+    )
+    .await;
+    let (_, t) = timeline(&d, READ, "").await;
+    assert_eq!(t["entries"].as_array().unwrap().len(), 3, "{t}");
+    d.shutdown();
+}
+
+// ------------------------------------------------------------------ hub mode
+
+/// A hub: auto-approves and follows back, ingests only TLP:CLEAR, and
+/// auto-trusts connected nodes.
+async fn spawn_hub(dir: &Path, name: &str) -> Daemon {
+    spawn_hub_with(dir, name, false).await
+}
+
+async fn spawn_hub_with(dir: &Path, name: &str, manual: bool) -> Daemon {
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = public.local_addr().unwrap().port();
+    let d = dir.join(name);
+    let cfg = format!(
+        r#"
+[instance]
+base_url = "http://127.0.0.1:{port}"
+organization = "Hub {name}"
+[storage]
+database = "{db}"
+key_file = "{key}"
+[public]
+bind = "127.0.0.1:0"
+[api]
+bind = "127.0.0.1:0"
+[control]
+socket = "{sock}"
+[federation]
+allow_http = true
+allow_private_addresses = true
+sync_interval_secs = 3600
+auto_follow_back = true
+max_ingest_tlp = "clear"
+[publish]
+manually_approves_followers = {manual}
+batch_interval_secs = 3600
+[policy]
+recompute_interval_secs = 3600
+auto_trust_followers = true
+auto_trust_weight = 1
+allowlist = ["8.8.8.8"]
+"#,
+        db = d.join("db.sqlite").display(),
+        key = d.join("key.pem").display(),
+        sock = d.join("control.sock").display(),
+    );
+    let cfg = Config::parse(&cfg).unwrap();
+    let d = pubsecd::start_with_listeners(cfg, public, api)
+        .await
+        .unwrap();
+    add_token(&d, "read", READ, &[ApiScope::Read], Tlp::Amber).await;
+    d
+}
+
+/// A participant node that auto-approves, so the hub's follow-back is
+/// accepted and its CLEAR evidence is delivered to the hub.
+async fn spawn_open_node(dir: &Path, name: &str) -> Daemon {
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = public.local_addr().unwrap().port();
+    let d = dir.join(name);
+    let cfg = format!(
+        r#"
+[instance]
+base_url = "http://127.0.0.1:{port}"
+organization = "Node {name}"
+[storage]
+database = "{db}"
+key_file = "{key}"
+[public]
+bind = "127.0.0.1:0"
+[api]
+bind = "127.0.0.1:0"
+[control]
+socket = "{sock}"
+[federation]
+allow_http = true
+allow_private_addresses = true
+sync_interval_secs = 3600
+[publish]
+manually_approves_followers = false
+batch_interval_secs = 3600
+[policy]
+recompute_interval_secs = 3600
+allowlist = ["8.8.8.8"]
+"#,
+        db = d.join("db.sqlite").display(),
+        key = d.join("key.pem").display(),
+        sock = d.join("control.sock").display(),
+    );
+    let cfg = Config::parse(&cfg).unwrap();
+    let d = pubsecd::start_with_listeners(cfg, public, api)
+        .await
+        .unwrap();
+    add_token(&d, "push", PUSH, &[ApiScope::Push], Tlp::Green).await;
+    d
+}
+
+async fn api_nodes(d: &Daemon, token: &str) -> Vec<Value> {
+    let r: Value = reqwest::Client::new()
+        .get(format!("http://{}/api/v1/nodes", d.api_addr))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    r.as_array().cloned().unwrap_or_default()
+}
+
+/// Hub mode: a node follows the hub, the hub follows back and trusts it,
+/// ingests only TLP:CLEAR, and requires corroboration (k=2) to activate.
+#[tokio::test]
+async fn hub_mode() {
+    const CORROBORATED: &str = "45.13.7.9";
+    const GREEN_ONLY: &str = "45.13.7.10";
+    let dir = tempfile::tempdir().unwrap();
+    let h = spawn_hub(dir.path(), "hub").await;
+    let n1 = spawn_open_node(dir.path(), "n1").await;
+    let n1_actor = n1.state.urls.actor.clone();
+
+    // N1 follows the hub; the hub auto-approves and follows N1 back.
+    ctl_ok(
+        &n1,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("hub follows n1 back", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().any(|f| f.actor == n1_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+
+    // N1 reports CORROBORATED as TLP:CLEAR. The hub ingests it and trusts N1.
+    push(
+        &n1,
+        PUSH,
+        json!({"value": CORROBORATED, "behavior": "ssh-bruteforce", "tlp": "clear"}),
+    )
+    .await;
+    publish::run_batch(&n1.state).await.unwrap();
+    wait_for("hub ingested n1 sighting", || async {
+        match ctl(
+            &h,
+            Request::Lookup {
+                value: CORROBORATED.into(),
+            },
+        )
+        .await
+        {
+            Reply::Lookup(l) => (!l.evidence.is_empty()).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    // A single node (weight 1) is below k=2: not active.
+    ctl_ok(&h, Request::Recompute).await;
+    assert!(
+        active(&h, READ)
+            .await
+            .iter()
+            .all(|e| e["observableValue"] != CORROBORATED),
+        "a single node must not activate an observable alone"
+    );
+
+    // A second node corroborates the same observable: now active.
+    let n2 = spawn_open_node(dir.path(), "n2").await;
+    let n2_actor = n2.state.urls.actor.clone();
+    ctl_ok(
+        &n2,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("hub follows n2 back", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().any(|f| f.actor == n2_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    push(
+        &n2,
+        PUSH,
+        json!({"value": CORROBORATED, "behavior": "ssh-bruteforce", "tlp": "clear"}),
+    )
+    .await;
+    publish::run_batch(&n2.state).await.unwrap();
+    wait_for("hub holds corroborating evidence", || async {
+        match ctl(
+            &h,
+            Request::Lookup {
+                value: CORROBORATED.into(),
+            },
+        )
+        .await
+        {
+            Reply::Lookup(l) => {
+                let n1 = l.evidence.iter().any(|e| e.publisher == n1_actor);
+                let n2 = l.evidence.iter().any(|e| e.publisher == n2_actor);
+                (n1 && n2).then_some(())
+            }
+            _ => None,
+        }
+    })
+    .await;
+    ctl_ok(&h, Request::Recompute).await;
+    assert!(
+        active(&h, READ)
+            .await
+            .iter()
+            .any(|e| e["observableValue"] == CORROBORATED),
+        "corroborated observable must be active"
+    );
+
+    // The hub ingests only TLP:CLEAR: N1's GREEN report is dropped. Force the
+    // hub to pull N1's activeObjects (which now carries the GREEN Sighting).
+    push(
+        &n1,
+        PUSH,
+        json!({"value": GREEN_ONLY, "behavior": "ssh-bruteforce", "tlp": "green"}),
+    )
+    .await;
+    publish::run_batch(&n1.state).await.unwrap();
+    pubsecd::sync::sync_due(&h.state).await.unwrap();
+    let Reply::Lookup(l) = ctl(
+        &h,
+        Request::Lookup {
+            value: GREEN_ONLY.into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(
+        l.evidence.is_empty(),
+        "TLP:GREEN evidence must not be ingested"
+    );
+
+    // The connected-node directory lists the connected nodes.
+    let nodes = api_nodes(&h, READ).await;
+    assert!(nodes.iter().any(|n| n["actor"] == n1_actor), "{nodes:?}");
+    assert!(nodes.iter().any(|n| n["actor"] == n2_actor), "{nodes:?}");
+
+    // An administrator's policy is never overwritten by auto-trust: N3's
+    // operator is distrusted before N3 connects, and stays distrusted.
+    let n3 = spawn_open_node(dir.path(), "n3").await;
+    let n3_actor = n3.state.urls.actor.clone();
+    let n3_org = n3.state.urls.org.clone();
+    ctl_ok(
+        &h,
+        Request::SetOperatorPolicy {
+            operator: n3_org.clone(),
+            behavior: None,
+            policy: OperatorPolicy {
+                trusted: false,
+                weight: 0.0,
+            },
+        },
+    )
+    .await;
+    ctl_ok(
+        &n3,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("hub follows n3 back", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().any(|f| f.actor == n3_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+
+    // N2 disconnects: the hub undoes its follow-back and withdraws the
+    // auto-trust, so the observable falls below the quorum again.
+    let n2_org = n2.state.urls.org.clone();
+    assert!(operator_policy(&h, &n2_org)
+        .await
+        .is_some_and(|p| p.trusted));
+    ctl_ok(
+        &n2,
+        Request::Unfollow {
+            actor: h.state.urls.actor.clone(),
+        },
+    )
+    .await;
+    wait_for("hub unfollows n2", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().all(|f| f.actor != n2_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    wait_for("hub withdraws n2's auto-trust", || async {
+        operator_policy(&h, &n2_org).await.is_none().then_some(())
+    })
+    .await;
+    ctl_ok(&h, Request::Recompute).await;
+    assert!(
+        active(&h, READ)
+            .await
+            .iter()
+            .all(|e| e["observableValue"] != CORROBORATED),
+        "a disconnected node's evidence must no longer count"
+    );
+    // By now N3's follow-back task has long finished.
+    assert_eq!(
+        operator_policy(&h, &n3_org).await,
+        Some(OperatorPolicy {
+            trusted: false,
+            weight: 0.0
+        }),
+        "auto-trust must not overwrite an administrator's policy"
+    );
+    h.shutdown();
+    n1.shutdown();
+    n2.shutdown();
+    n3.shutdown();
+}
+
+/// The operator-wide policy the hub holds for `operator`, if any.
+async fn operator_policy(d: &Daemon, operator: &str) -> Option<OperatorPolicy> {
+    match ctl(d, Request::ListOperators).await {
+        Reply::Operators(ops) => ops
+            .into_iter()
+            .find(|o| o.id == operator)
+            .and_then(|o| o.default_policy),
+        r => panic!("{r:?}"),
+    }
+}
+
+/// Hub mode with manual approval: a pending follower is neither followed
+/// back nor trusted until an administrator approves it.
+#[tokio::test]
+async fn hub_mode_manual_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = spawn_hub_with(dir.path(), "hub", true).await;
+    let n = spawn_open_node(dir.path(), "n").await;
+    let n_actor = n.state.urls.actor.clone();
+    ctl_ok(
+        &n,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    wait_for("follow request pending at the hub", || async {
+        match ctl(&h, Request::ListFollowers).await {
+            Reply::Followers(f) => f.iter().any(|f| f.actor == n_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    let Reply::Following(f) = ctl(&h, Request::ListFollowing).await else {
+        panic!()
+    };
+    assert!(f.is_empty(), "pending follower must not be followed back");
+    assert_eq!(operator_policy(&h, &n.state.urls.org).await, None);
+
+    ctl_ok(
+        &h,
+        Request::ApproveFollower {
+            actor: n_actor.clone(),
+        },
+    )
+    .await;
+    wait_for("hub follows n back after approval", || async {
+        match ctl(&h, Request::ListFollowing).await {
+            Reply::Following(f) => f.iter().any(|f| f.actor == n_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    wait_for("hub trusts n after approval", || async {
+        operator_policy(&h, &n.state.urls.org)
+            .await
+            .is_some_and(|p| p.trusted)
+            .then_some(())
+    })
+    .await;
+    h.shutdown();
+    n.shutdown();
+}

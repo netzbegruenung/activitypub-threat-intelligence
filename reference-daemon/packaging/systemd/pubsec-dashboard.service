@@ -1,0 +1,30 @@
+[Unit]
+Description=AP-TI dashboard renderer
+Documentation=https://github.com/netzbegruenung/activitypub-threat-intelligence
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pubsec-dashboard
+Group=pubsec-dashboard
+ExecStart=/usr/bin/pubsec-dashboard --config /etc/pubsec-dashboard/config.toml
+StateDirectory=pubsec-dashboard
+StateDirectoryMode=0750
+ReadWritePaths=/var/www/pubsec-dashboard
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

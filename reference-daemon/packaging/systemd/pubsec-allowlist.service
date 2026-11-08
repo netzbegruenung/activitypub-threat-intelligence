@@ -1,0 +1,33 @@
+[Unit]
+Description=AP-TI allowlist sync
+Documentation=https://github.com/netzbegruenung/activitypub-threat-intelligence
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pubsec-allowlist
+Group=pubsec-allowlist
+# Use --source-of-truth instead of --append to let the file remove entries.
+ExecStart=/usr/bin/pubsec-allowlist --config /etc/pubsec-allowlist/config.toml --append
+Restart=on-failure
+RestartSec=5
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

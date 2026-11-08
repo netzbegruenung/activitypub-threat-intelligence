@@ -1,0 +1,28 @@
+# pubsecd image: copies the released binaries (no Rust toolchain, no registry).
+# Build: docker compose build   (PUBSEC_VERSION from .env, e.g. v2026.10.9)
+ARG DEBIAN_TAG=trixie-slim
+
+FROM debian:${DEBIAN_TAG} AS fetch
+ARG PUBSEC_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /dl
+RUN test -n "$PUBSEC_VERSION" || { echo "set PUBSEC_VERSION (e.g. v2026.10.9)" >&2; exit 1; }
+RUN base="https://github.com/netzbegruenung/activitypub-threat-intelligence/releases/download/${PUBSEC_VERSION}" \
+ && for f in SHA256SUMS pubsecd-${PUBSEC_VERSION}-linux-x86_64 pubsec-tui-${PUBSEC_VERSION}-linux-x86_64; do \
+      curl -fsSLO "$base/$f"; done \
+ && grep -E " (pubsecd|pubsec-tui)-${PUBSEC_VERSION}-linux-x86_64\$" SHA256SUMS | sha256sum -c - \
+ && install -m 0755 pubsecd-${PUBSEC_VERSION}-linux-x86_64 /pubsecd \
+ && install -m 0755 pubsec-tui-${PUBSEC_VERSION}-linux-x86_64 /pubsec-tui
+
+FROM debian:${DEBIAN_TAG}
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --home-dir /var/lib/pubsecd --shell /usr/sbin/nologin pubsecd \
+ && install -d -o pubsecd -g pubsecd -m 0750 /var/lib/pubsecd /run/pubsecd
+COPY --from=fetch /pubsecd /pubsec-tui /usr/local/bin/
+USER pubsecd
+VOLUME ["/var/lib/pubsecd", "/run/pubsecd"]
+EXPOSE 8080 8081
+ENTRYPOINT ["tini", "--", "pubsecd"]
+CMD ["--config", "/etc/pubsecd/config.toml"]

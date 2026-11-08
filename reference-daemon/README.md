@@ -1,4 +1,4 @@
-# AP-TI reference daemon
+# pubsec reference daemon
 
 Reference implementation of the *ActivityPub Threat Intelligence Profile*
 ([`../proposal.md`](../proposal.md), draft-activitypub-threatintel-00).
@@ -7,14 +7,14 @@ It follows the deployment model of Appendix D. The workspace contains these crat
 
 | Crate | Kind | Contents |
 |---|---|---|
-| `apti-core` | library | Data model (Sec. 4), normalisation (4.1, 10), policy and effective-expiry engine (Sec. 7), control-socket protocol. No I/O. |
-| `aptid` | daemon | ActivityPub federation, SQLite storage, internal REST API, control socket. |
-| `apti-tui` | TUI | Management client that talks to the daemon over the control socket. |
-| `apti-fail2ban` | connector | Pushes fail2ban bans to aptid and writes aptid's active list to files that fail2ban bans from. |
-| `apti-allowlist` | connector | Keeps aptid's local allowlist in sync with a text file (bulk import). |
-| `apti-rspamd` | connector | Reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to aptid, and serves aptid's active list to Rspamd as multimap files. |
-| `apti-dashboard` | tool | Renders a static HTML world map of findings per country (GeoIP), with a time slider and behaviour/origin filters. |
-| `apti-statsd` | connector | Publishes aggregate statistics over a hub's TLP:CLEAR dataset: a statistics page (no individual observables) and a JSON directory of the hub's connected nodes. |
+| `pubsec-core` | library | Data model (Sec. 4), normalisation (4.1, 10), policy and effective-expiry engine (Sec. 7), control-socket protocol. No I/O. |
+| `pubsecd` | daemon | ActivityPub federation, SQLite storage, internal REST API, control socket. |
+| `pubsec-tui` | TUI | Management client that talks to the daemon over the control socket. |
+| `pubsec-fail2ban` | connector | Pushes fail2ban bans to pubsecd and writes pubsecd's active list to files that fail2ban bans from. |
+| `pubsec-allowlist` | connector | Keeps pubsecd's local allowlist in sync with a text file (bulk import). |
+| `pubsec-rspamd` | connector | Reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to pubsecd, and serves pubsecd's active list to Rspamd as multimap files. |
+| `pubsec-dashboard` | tool | Renders a static HTML world map of findings per country (GeoIP), with a time slider and behaviour/origin filters. |
+| `pubsec-statsd` | connector | Publishes aggregate statistics over a hub's TLP:CLEAR dataset: a statistics page (no individual observables) and a JSON directory of the hub's connected nodes. |
 
 ## Build and run
 
@@ -22,29 +22,46 @@ Requires Rust ≥ 1.85. SQLite is built in (`rusqlite` with the `bundled` featur
 
 ```sh
 cargo build --release
-cp config.example.toml /etc/aptid/config.toml   # then edit it
-./target/release/aptid --config /etc/aptid/config.toml --check
-./target/release/aptid --config /etc/aptid/config.toml
-./target/release/apti-tui --socket /run/aptid/control.sock
+cp config.example.toml /etc/pubsecd/config.toml   # then edit it
+./target/release/pubsecd --config /etc/pubsecd/config.toml --check
+./target/release/pubsecd --config /etc/pubsecd/config.toml
+./target/release/pubsec-tui --socket /run/pubsecd/control.sock
 ```
 
-Logging uses `RUST_LOG`, e.g. `RUST_LOG=aptid=debug`.
+Logging uses `RUST_LOG`, e.g. `RUST_LOG=pubsecd=debug`.
 
 ### Debian packages
 
-Every release ships amd64 `.deb` packages for `aptid` (which also contains
-`apti-tui`), `apti-fail2ban`, `apti-rspamd`, `apti-statsd`, `apti-allowlist`
-and `apti-dashboard`. Each one installs the binary, a systemd unit and the
+Every release ships amd64 `.deb` packages for `pubsecd` (which also contains
+`pubsec-tui`), `pubsec-fail2ban`, `pubsec-rspamd`, `pubsec-statsd`, `pubsec-allowlist`
+and `pubsec-dashboard`. Each one installs the binary, a systemd unit and the
 default configuration as a conffile under `/etc/<name>/config.toml`, plus the
 fail2ban filter and the Rspamd drop-ins where applicable. The units are
 enabled but not started, because the shipped configuration still contains
 placeholders:
 
 ```sh
-dpkg -i aptid_2026.10.10_amd64.deb
-editor /etc/aptid/config.toml
-systemctl start aptid
+dpkg -i pubsecd_2026.10.10_amd64.deb
+editor /etc/pubsecd/config.toml
+systemctl start pubsecd
 ```
+
+#### Upgrading from the `apti` packages
+
+The project was renamed from `apti`/`aptid` to `pubsec`/`pubsecd`. There is no
+automatic migration: stop and purge the old packages, then move the state and
+configuration into place before starting the new units.
+
+```sh
+systemctl stop aptid apti-fail2ban apti-rspamd apti-statsd apti-allowlist
+mv /etc/aptid /etc/pubsecd
+mv /var/lib/aptid/aptid.sqlite /var/lib/pubsecd/pubsecd.sqlite
+```
+
+The same `/etc/apti-<name>` → `/etc/pubsec-<name>` and `/var/lib/apti-<name>` →
+`/var/lib/pubsec-<name>` move applies to each connector. Inside the
+configuration files, the `[aptid]` section is now `[pubsecd]`; API tokens and
+keys carry over unchanged.
 
 To build them from a checkout, compile the workspace first and then run
 [`packaging/build-deb.sh`](packaging/build-deb.sh):
@@ -55,7 +72,7 @@ packaging/build-deb.sh v2026.10.10 target/release ./dist
 ```
 
 For containers, see [`docker/README.md`](docker/README.md): a compose file for
-`aptid` and for `apti-fail2ban` (with fail2ban inside), built locally from the
+`pubsecd` and for `pubsec-fail2ban` (with fail2ban inside), built locally from the
 release binaries.
 
 ### Audit log
@@ -66,7 +83,7 @@ it. Audit lines have the target `audit` and are logged at INFO regardless
 of `RUST_LOG`:
 
 ```sh
-journalctl -u aptid -g ' audit: '
+journalctl -u pubsecd -g ' audit: '
 ```
 
 ```
@@ -96,10 +113,10 @@ The daemon opens three endpoints:
 - **Public listener** (`[public].bind`): the ActivityPub endpoints. Run it
   behind a TLS-terminating reverse proxy that passes the `Host` header through
   unchanged, because HTTP signatures cover it.
-- **Internal REST API** (`[api].bind`): bearer tokens managed in `apti-tui`
+- **Internal REST API** (`[api].bind`): bearer tokens managed in `pubsec-tui`
   (see [API tokens](#api-tokens)).
   Bind it to an internal address only.
-- **Control socket** (`[control].socket`): a unix socket for `apti-tui`,
+- **Control socket** (`[control].socket`): a unix socket for `pubsec-tui`,
   created with the configured mode. Each peer is checked with `SO_PEERCRED`:
   the daemon's own uid and root are always allowed, plus `allowed_uids` /
   `allowed_gids`.
@@ -132,7 +149,7 @@ defaults, your own sensors can activate an observable on their own. Set
 ### API tokens
 
 Create tokens in the TUI's **Tokens** tab (`a`). The daemon generates a
-random 256-bit secret (`apti_…`), shows it **once** and stores only its
+random 256-bit secret (`pubsec_…`), shows it **once** and stores only its
 SHA-512 hash in the database. Each token has:
 
 - a unique name (shown in logs);
@@ -225,7 +242,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 ```
 
 The observation periods of stored evidence, for statistics such as
-`apti-dashboard`. Unlike the active list, this is what was seen, not what is
+`pubsec-dashboard`. Unlike the active list, this is what was seen, not what is
 enforced: trust, quorum and expiry play no part.
 
 - **Entries:** one per Sighting or ThreatIndicator and behaviour.
@@ -261,7 +278,7 @@ The actors this node follows, one entry each, with the display `handle` and
 `name` (cached actor document), the resolved `operator`, how much `evidence`
 that actor has published, and the follow `state` (`pending`, `accepted` or
 `rejected`). On a [hub](#hub-mode) these are the connected nodes, so this is
-the public node directory that `apti-statsd` republishes.
+the public node directory that `pubsec-statsd` republishes.
 
 ### Manage the allowlist
 
@@ -317,23 +334,23 @@ Behaviour:
 
 `GET /api/v1/health` returns `{"status":"ok"}` and needs no token.
 
-## fail2ban connector (`apti-fail2ban`)
+## fail2ban connector (`pubsec-fail2ban`)
 
-`apti-fail2ban` connects fail2ban to aptid in both directions:
+`pubsec-fail2ban` connects fail2ban to pubsecd in both directions:
 
 | Subcommand | Direction |
 |---|---|
-| `push` | Follows the fail2ban log and sends every `Ban` / `Increase Ban` to aptid as an observation (needs a `push` token). |
+| `push` | Follows the fail2ban log and sends every `Ban` / `Increase Ban` to pubsecd as an observation (needs a `push` token). |
 | `pull` | Polls `GET /api/v1/active` and appends ban lines to files that fail2ban jails follow (needs a `read` token). `pull --once` updates the files once, e.g. from cron. |
 | `run` | Both. |
 | `check` | Validates the config. |
 
 ```sh
-apti-fail2ban -c /etc/apti-fail2ban/config.toml check
-apti-fail2ban -c /etc/apti-fail2ban/config.toml run
+pubsec-fail2ban -c /etc/pubsec-fail2ban/config.toml check
+pubsec-fail2ban -c /etc/pubsec-fail2ban/config.toml run
 ```
 
-See [`crates/apti-fail2ban/apti-fail2ban.example.toml`](crates/apti-fail2ban/apti-fail2ban.example.toml).
+See [`crates/pubsec-fail2ban/pubsec-fail2ban.example.toml`](crates/pubsec-fail2ban/pubsec-fail2ban.example.toml).
 
 ### Push
 
@@ -345,14 +362,14 @@ See [`crates/apti-fail2ban/apti-fail2ban.example.toml`](crates/apti-fail2ban/apt
 - **Batching:** bans are sent every `batch_interval_secs`, at most 1000 per
   request.
 - **Resuming:** the read position (inode and offset) is saved only after
-  aptid has accepted the batch. If aptid is unreachable, bans stay queued
+  pubsecd has accepted the batch. If pubsecd is unreachable, bans stay queued
   (bounded by `max_queue`) and are retried with backoff. On first start the
   client begins at the end of the log.
 - **Log handling:** both log rotation and copy-truncate are handled.
 - **Log target:** fail2ban must log to a file (`logtarget = /var/log/fail2ban.log`),
   not to syslog or the journal.
 
-> **Feedback loop:** put the jails fed by `pull` (e.g. `aptid-ssh`) into
+> **Feedback loop:** put the jails fed by `pull` (e.g. `pubsecd-ssh`) into
 > `push.ignore_jails`. Otherwise bans imported from peers would be published
 > again as your own Sightings.
 
@@ -361,22 +378,22 @@ See [`crates/apti-fail2ban/apti-fail2ban.example.toml`](crates/apti-fail2ban/apt
 1. Install the filter and the example jail:
 
    ```sh
-   cp crates/apti-fail2ban/fail2ban/filter.d/apti.conf /etc/fail2ban/filter.d/
-   cp crates/apti-fail2ban/fail2ban/jail.d/aptid-ssh.conf.example /etc/fail2ban/jail.d/aptid-ssh.conf
+   cp crates/pubsec-fail2ban/fail2ban/filter.d/pubsec.conf /etc/fail2ban/filter.d/
+   cp crates/pubsec-fail2ban/fail2ban/jail.d/pubsecd-ssh.conf.example /etc/fail2ban/jail.d/pubsecd-ssh.conf
    ```
 
 2. Each `[[pull.output]]` selects entries by behaviour, IP type and
    (optionally) port, and appends lines such as:
 
    ```
-   2026-10-03 16:05:59 apti-ban 45.13.7.9 behavior=ssh-bruteforce expires=2026-10-04T14:05:55Z
+   2026-10-03 16:05:59 pubsec-ban 45.13.7.9 behavior=ssh-bruteforce expires=2026-10-04T14:05:55Z
    ```
 
    CIDR prefixes are written as-is; the filter uses `<SUBNET>`, which needs
    fail2ban ≥ 0.10. Domains are never written.
 
 3. Check that the filter matches the file:
-   `fail2ban-regex /var/log/apti-fail2ban/ssh.log /etc/fail2ban/filter.d/apti.conf`
+   `fail2ban-regex /var/log/pubsec-fail2ban/ssh.log /etc/fail2ban/filter.d/pubsec.conf`
 
 **How bans follow the effective expiry.** fail2ban bans for a fixed
 `bantime`, so the connector approximates each entry's effective expiry:
@@ -389,12 +406,12 @@ See [`crates/apti-fail2ban/apti-fail2ban.example.toml`](crates/apti-fail2ban/apt
 Use `maxretry = 1` and `bantime > refresh_secs + interval_secs`. The
 defaults are 1800 + 300 s, with `bantime = 3600`.
 
-If aptid is unreachable, nothing is written, so existing bans simply run out.
+If pubsecd is unreachable, nothing is written, so existing bans simply run out.
 Files are rotated to `.1` when they exceed `max_size_bytes`.
 
-## Allowlist file (`apti-allowlist`)
+## Allowlist file (`pubsec-allowlist`)
 
-`apti-allowlist` keeps the local or published allowlist in sync with a
+`pubsec-allowlist` keeps the local or published allowlist in sync with a
 hand-edited text file through the REST API (needs an `allowlist` token). The file holds one IP
 address, CIDR prefix or domain per line; `#` starts a comment and blank lines
 are ignored. Entries apply to all behaviours. Local entries never expire;
@@ -409,11 +426,11 @@ runs.
 | `--check` | Validates the config. |
 
 ```sh
-apti-allowlist -c /etc/apti-allowlist/config.toml --check
-apti-allowlist -c /etc/apti-allowlist/config.toml --source-of-truth
+pubsec-allowlist -c /etc/pubsec-allowlist/config.toml --check
+pubsec-allowlist -c /etc/pubsec-allowlist/config.toml --source-of-truth
 ```
 
-See [`crates/apti-allowlist/apti-allowlist.example.toml`](crates/apti-allowlist/apti-allowlist.example.toml).
+See [`crates/pubsec-allowlist/pubsec-allowlist.example.toml`](crates/pubsec-allowlist/pubsec-allowlist.example.toml).
 
 - **Reconcile:** the whole file is read every `poll_interval_secs`. A change
   is applied once the content is the same at two consecutive reads, so a
@@ -425,7 +442,7 @@ See [`crates/apti-allowlist/apti-allowlist.example.toml`](crates/apti-allowlist/
   published entries, has the configured TLP). A TUI entry restricted to some
   behaviours does not count, and the tool adds its own entry.
 - **Ownership:** entries the tool creates carry the internal source
-  `apti-allowlist:<path>` (`file.source`), which is never published.
+  `pubsec-allowlist:<path>` (`file.source`), which is never published.
   Source-of-truth mode removes only these, unless `prune_all = true`, which
   removes every entry of the scope that is not in the file. Use a distinct
   source per file if you run several instances. `file.summary` is an
@@ -436,13 +453,13 @@ See [`crates/apti-allowlist/apti-allowlist.example.toml`](crates/apti-allowlist/
   would remove more than `max_removals` entries (default 100) removes none.
   Invalid lines are logged and skipped.
 - **Domains** cover only themselves, not their subdomains (unlike
-  `policy.allowlist` in the aptid config).
+  `policy.allowlist` in the pubsecd config).
 - **Published entries:** with `file.scope = "published"` the entries are
   federated as `strongly-disagree` Opinions with `file.tlp` (required; not
   RED). The token needs `allowlist` and `publish`; removals send `Delete` to
-  followers. Activities go out with aptid's next publish batch, so a bulk
+  followers. Activities go out with pubsecd's next publish batch, so a bulk
   import or a TLP change becomes a few activities, not one per line. Values must pass the checks for published evidence (no private
-  addresses, prefixes of at least /24 or /48); aptid rejects the others.
+  addresses, prefixes of at least /24 or /48); pubsecd rejects the others.
   Entries are valid for `valid_for_days` (default 90) and are extended with
   an `Update` once they expire within `renew_before_days` (default a tenth).
   An entry with another TLP does not count: changing `file.tlp` publishes
@@ -452,18 +469,18 @@ See [`crates/apti-allowlist/apti-allowlist.example.toml`](crates/apti-allowlist/
   only local entries make `POST /api/v1/observations` reject a value.
 - **Rejected values** are logged when the file changes and retried at the
   next resync.
-- **Outages:** if aptid is unreachable, the reconcile is retried with
+- **Outages:** if pubsecd is unreachable, the reconcile is retried with
   backoff.
 
-## Rspamd connector (`apti-rspamd`)
+## Rspamd connector (`pubsec-rspamd`)
 
-`apti-rspamd` connects Rspamd to aptid in both directions. It runs one local
+`pubsec-rspamd` connects Rspamd to pubsecd in both directions. It runs one local
 HTTP endpoint (`[server].bind`, default `127.0.0.1:11380`):
 
 | Path | Direction |
 |---|---|
-| `POST /v1/report` | A Lua plugin in Rspamd posts the result of each scanned message. IPs and, optionally, SPF-authenticated envelope-from domains that keep sending bad messages are reported to aptid as observations (`[ingest]`, needs a `push` token). |
-| `GET /maps/<name>` | aptid's active list as multimap files, refreshed every `maps.interval_secs` (`[maps]`, needs a `read` token). |
+| `POST /v1/report` | A Lua plugin in Rspamd posts the result of each scanned message. IPs and, optionally, SPF-authenticated envelope-from domains that keep sending bad messages are reported to pubsecd as observations (`[ingest]`, needs a `push` token). |
+| `GET /maps/<name>` | pubsecd's active list as multimap files, refreshed every `maps.interval_secs` (`[maps]`, needs a `read` token). |
 
 | Subcommand | Effect |
 |---|---|
@@ -472,11 +489,11 @@ HTTP endpoint (`[server].bind`, default `127.0.0.1:11380`):
 | `check` | Validates the config. |
 
 ```sh
-apti-rspamd -c /etc/apti-rspamd/config.toml check
-apti-rspamd -c /etc/apti-rspamd/config.toml run
+pubsec-rspamd -c /etc/pubsec-rspamd/config.toml check
+pubsec-rspamd -c /etc/pubsec-rspamd/config.toml run
 ```
 
-See [`crates/apti-rspamd/apti-rspamd.example.toml`](crates/apti-rspamd/apti-rspamd.example.toml).
+See [`crates/pubsec-rspamd/pubsec-rspamd.example.toml`](crates/pubsec-rspamd/pubsec-rspamd.example.toml).
 Keep the endpoint on loopback: the maps contain TLP-restricted data, limited
 by the read token's `max_tlp`.
 
@@ -486,12 +503,12 @@ by the read token's `max_tlp`.
    `LOCAL_CONFDIR` are both `/etc/rspamd`):
 
    ```sh
-   cp crates/apti-rspamd/rspamd/lua.local.d/apti.lua /etc/rspamd/lua.local.d/
-   cp crates/apti-rspamd/rspamd/modules.local.d/apti.conf /etc/rspamd/modules.local.d/
+   cp crates/pubsec-rspamd/rspamd/lua.local.d/pubsec.lua /etc/rspamd/lua.local.d/
+   cp crates/pubsec-rspamd/rspamd/modules.local.d/pubsec.conf /etc/rspamd/modules.local.d/
    ```
 
-   Set `secret` in `apti.conf` to `ingest.report_secret`. The plugin
-   registers the idempotent symbol `APTI_REPORT`, which runs after scoring.
+   Set `secret` in `pubsec.conf` to `ingest.report_secret`. The plugin
+   registers the idempotent symbol `PUBSEC_REPORT`, which runs after scoring.
    For each message with a score of at least its `min_score` it sends the
    sending IP, the envelope-from domain, the score, the action, the names
    and scores of all symbols that fired (also those with score 0) and
@@ -507,16 +524,16 @@ by the read token's `max_tlp`.
 
 - **Skipped senders:** authenticated users (`ignore_authenticated`),
   special-purpose addresses and `ignore_networks` (own relays, backup MX).
-  aptid also rejects allowlisted values.
+  pubsecd also rejects allowlisted values.
 - **IPv6** senders are tracked and reported as their `ipv6_prefix` (default
-  /64; aptid accepts /48 and longer).
+  /64; pubsecd accepts /48 and longer).
 - **Batching and outages:** reports are sent every `batch_interval_secs`, at
-  most 1000 per request. If aptid is unreachable they stay queued (bounded by
+  most 1000 per request. If pubsecd is unreachable they stay queued (bounded by
   `max_queue`) and are retried with backoff. The counters are in memory only;
   `max_tracked` bounds how many IPs and domains are tracked.
 - **TLP:** `ingest.tlp` and `ingest.envelope_from.tlp` set the TLP of the
   reported IPs and domains separately (see the `tlp` field of
-  [push observations](#push-observations-scope-push)). Unset, aptid uses the
+  [push observations](#push-observations-scope-push)). Unset, pubsecd uses the
   behaviour's publish TLP.
 
 #### Envelope-from domains
@@ -533,7 +550,7 @@ never its parent. A message counts for its domain only if:
   authorised the sending IP, so the domain owner is responsible;
 - no symbol in `skip_symbols` fired, by default `FREEMAIL_ENVFROM` and
   `DISPOSABLE_ENVFROM`, which Rspamd sets for shared mail providers;
-- the domain passes aptid's normalisation and is not in `ignore_domains`
+- the domain passes pubsecd's normalisation and is not in `ignore_domains`
   (which also matches subdomains).
 
 A domain with `min_messages` such messages from at least `min_senders`
@@ -548,32 +565,32 @@ distinct senders within `window_secs` is reported, at most once per
 - **Shared SPF:** SPF records that include large platforms let other
   customers of the platform pass SPF for the domain. Raise `min_messages`
   or `min_senders` if that is a concern, and set `local_weight` below `k`
-  in aptid to require confirmation from peers.
+  in pubsecd to require confirmation from peers.
 
 > **Feedback loop:** the symbols of the multimaps fed by `[maps]` must match
-> `ignore_symbols` (default `APTI_*`). Otherwise a message that is bad only
+> `ignore_symbols` (default `PUBSEC_*`). Otherwise a message that is bad only
 > because a peer listed its sender would be published again as your own
 > Sighting.
 
 ### Maps
 
 Add the rules of
-[`rspamd/local.d/multimap.conf.example`](crates/apti-rspamd/rspamd/local.d/multimap.conf.example)
+[`rspamd/local.d/multimap.conf.example`](crates/pubsec-rspamd/rspamd/local.d/multimap.conf.example)
 to `/etc/rspamd/local.d/multimap.conf`:
 
 | Symbol | Matches | Map (example config) |
 |---|---|---|
-| `APTI_BAD_IP` | sending IP | `ip`: all behaviours |
-| `APTI_BAD_URL` | hosts of URLs in the message | `url-domains`: phishing, malware-hosting, command-and-control |
-| `APTI_BAD_FROM` | envelope sender domain | `sender-domains`: smtp-spam |
-| `APTI_BAD_HEADER_FROM` | `From` header domain | `sender-domains` |
+| `PUBSEC_BAD_IP` | sending IP | `ip`: all behaviours |
+| `PUBSEC_BAD_URL` | hosts of URLs in the message | `url-domains`: phishing, malware-hosting, command-and-control |
+| `PUBSEC_BAD_FROM` | envelope sender domain | `sender-domains`: smtp-spam |
+| `PUBSEC_BAD_HEADER_FROM` | `From` header domain | `sender-domains` |
 
 Each `[[maps.map]]` selects entries by `kind` (`ip` or `domain`) and
 behaviour. Entries flagged for review are left out unless
 `include_flagged = true`.
 
 ```
-# apti-rspamd map url-domains
+# pubsec-rspamd map url-domains
 # phishing
 /(^|\.)phish\.example\.com$/i
 ```
@@ -587,10 +604,10 @@ behaviour. Entries flagged for review are left out unless
   Unchanged maps are answered with `304`. Rspamd checks HTTP maps at most
   every `map_watch_interval` (5 minutes by default), so a change can take
   that long to reach Rspamd.
-- **Outages:** if aptid is unreachable, the maps are rendered from the last
+- **Outages:** if pubsecd is unreachable, the maps are rendered from the last
   fetched list, so entries still drop out at their effective expiry.
 
-## Threat map (`apti-dashboard`)
+## Threat map (`pubsec-dashboard`)
 
 Renders a world map of where findings come from as one static HTML page,
 with a time slider over a sliding window and filters for behaviour and
@@ -599,22 +616,22 @@ origin (own sightings or federated). Each run reads
 IP in a MaxMind DB and writes the page.
 
 ```sh
-cp crates/apti-dashboard/apti-dashboard.example.toml /etc/apti-dashboard/config.toml
-apti-dashboard --config /etc/apti-dashboard/config.toml --check
-apti-dashboard --config /etc/apti-dashboard/config.toml               # render once
-apti-dashboard --config /etc/apti-dashboard/config.toml --interval 900  # every 15 min
+cp crates/pubsec-dashboard/pubsec-dashboard.example.toml /etc/pubsec-dashboard/config.toml
+pubsec-dashboard --config /etc/pubsec-dashboard/config.toml --check
+pubsec-dashboard --config /etc/pubsec-dashboard/config.toml               # render once
+pubsec-dashboard --config /etc/pubsec-dashboard/config.toml --interval 900  # every 15 min
 ```
 
 Without `--interval` it renders once and exits, for cron or a systemd timer:
 
 ```ini
-# /etc/systemd/system/apti-dashboard.service
+# /etc/systemd/system/pubsec-dashboard.service
 [Service]
 Type=oneshot
-User=apti-dashboard
-ExecStart=/usr/local/bin/apti-dashboard --config /etc/apti-dashboard/config.toml
+User=pubsec-dashboard
+ExecStart=/usr/local/bin/pubsec-dashboard --config /etc/pubsec-dashboard/config.toml
 
-# /etc/systemd/system/apti-dashboard.timer
+# /etc/systemd/system/pubsec-dashboard.timer
 [Timer]
 OnCalendar=*:0/15
 [Install]
@@ -623,7 +640,7 @@ WantedBy=timers.target
 
 Setup:
 
-1. Create a token with scope `read` in apti-tui (Tokens tab). Its
+1. Create a token with scope `read` in pubsec-tui (Tokens tab). Its
    `max_tlp` decides what reaches the page; the page header shows the most
    restrictive TLP of the data on it.
 2. Get a country database: [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite)
@@ -656,7 +673,7 @@ The page:
   relative to the busiest country across all frames of the selected filter,
   so they stay comparable while the slider moves.
 - **Self-contained:** the map (Natural Earth 1:110m, public domain,
-  generated by [`assets/gen-world.py`](crates/apti-dashboard/assets/gen-world.py)),
+  generated by [`assets/gen-world.py`](crates/pubsec-dashboard/assets/gen-world.py)),
   CSS, data and script are inline; nothing is loaded from elsewhere. Small
   countries such as Singapore or Malta are not on the 1:110m map but are
   listed in the table.
@@ -674,10 +691,10 @@ counted once in each country its addresses are in.
 
 ## Hub mode
 
-A single aptid can act as a **hub**: a node that any other AP-TI node can
+A single pubsecd can act as a **hub**: a node that any other AP-TI node can
 connect to with no manual peer management, that ingests only TLP:CLEAR
 evidence, and whose aggregate statistics are published through
-`apti-statsd`.
+`pubsec-statsd`.
 
 A participant connects by following the hub's actor (`feed@<hub host>`). Once
 the follow is accepted (immediately with `manually_approves_followers =
@@ -707,7 +724,7 @@ active only when nodes of **two** distinct operators report it
 its value is the aggregate active list. Because it ingests and trusts only
 TLP:CLEAR, its active list and timeline contain TLP:CLEAR entries only. See
 [`config.example.toml`](config.example.toml) for the hub options and
-[apti-statsd](#apti-statsd) for the public page.
+[pubsec-statsd](#pubsec-statsd) for the public page.
 
 > **Trust model:** the quorum sums weight per *operator*, so two nodes of one
 > operator count once. But operators are self-declared: an operator is a
@@ -718,9 +735,9 @@ TLP:CLEAR, its active list and timeline contain TLP:CLEAR entries only. See
 > Treat the hub's active list as "reported by feeds of at least `k`
 > self-declared operators", not as a verdict.
 
-## apti-statsd
+## pubsec-statsd
 
-`apti-statsd` publishes aggregate statistics over a hub's TLP:CLEAR dataset.
+`pubsec-statsd` publishes aggregate statistics over a hub's TLP:CLEAR dataset.
 It polls the hub's internal REST API (`GET /api/v1/active`,
 `/api/v1/timeline`, `/api/v1/nodes`) every `poll.interval_secs` with a `read`
 token whose `max_tlp = "clear"`, reduces the active list and timeline to
@@ -739,10 +756,10 @@ counts, and publishes:
 | `check` | Validates the config. |
 
 ```sh
-cp crates/apti-statsd/apti-statsd.example.toml /etc/apti-statsd/config.toml
-apti-statsd -c /etc/apti-statsd/config.toml check
-apti-statsd -c /etc/apti-statsd/config.toml summary
-apti-statsd -c /etc/apti-statsd/config.toml run
+cp crates/pubsec-statsd/pubsec-statsd.example.toml /etc/pubsec-statsd/config.toml
+pubsec-statsd -c /etc/pubsec-statsd/config.toml check
+pubsec-statsd -c /etc/pubsec-statsd/config.toml summary
+pubsec-statsd -c /etc/pubsec-statsd/config.toml run
 ```
 
 - **TLP and personal data:** the hub ingests only TLP:CLEAR and the poller's
@@ -752,13 +769,13 @@ apti-statsd -c /etc/apti-statsd/config.toml run
   are not republished, and the page shows counts and distributions only.
 ### Static output (default)
 
-By default `apti-statsd` opens no listening socket. The page is a static
+By default `pubsec-statsd` opens no listening socket. The page is a static
 document (inline CSS, no JavaScript, no external resources), so after every
 poll it writes `index.html` and `nodes.json` into `server.output_dir`
-(default `/var/lib/apti-statsd/public`) and nginx, Apache or Caddy serves
+(default `/var/lib/pubsec-statsd/public`) and nginx, Apache or Caddy serves
 that directory. Each file is written under a temporary name and renamed into
 place, so a request never reads a half-written page. Nothing of
-`apti-statsd` is reachable from the network, and caching, compression and
+`pubsec-statsd` is reachable from the network, and caching, compression and
 rate limiting are the web server's.
 
 Point the web server's document root at that directory and let it revalidate
@@ -767,7 +784,7 @@ on every request, since the files are rewritten each `poll.interval_secs`:
 ```nginx
 server {
     server_name stats.example.net;
-    root /var/lib/apti-statsd/public;
+    root /var/lib/pubsec-statsd/public;
     add_header Cache-Control "no-cache" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "no-referrer" always;
@@ -777,7 +794,7 @@ server {
 
 ### Server mode
 
-Setting `server.bind` makes `apti-statsd` serve the page itself instead,
+Setting `server.bind` makes `pubsec-statsd` serve the page itself instead,
 behind a TLS-terminating reverse proxy on its own host or subdomain (e.g.
 `stats.example.net`). In that mode:
 
@@ -790,7 +807,7 @@ behind a TLS-terminating reverse proxy on its own host or subdomain (e.g.
   `server.trust_forwarded_for = true`: the client is then the **last**
   `X-Forwarded-For` entry, which the proxy sets or appends (Caddy, nginx
   `proxy_add_x_forwarded_for`). Earlier entries come from the client and are
-  ignored. Enable it only if `apti-statsd` is reachable through the proxy
+  ignored. Enable it only if `pubsec-statsd` is reachable through the proxy
   alone, or clients can pick their own address. At most 65,536 clients are
   tracked; when the table is full the oldest windows are evicted, so the
   table stays bounded without locking out clients that have not been seen.
@@ -854,18 +871,18 @@ show the position of the selected row; with a filter active it reads
 
 | Spec | Where |
 |---|---|
-| 4.1 Normalisation, 10 special-purpose rejection | `apti-core/src/normalize.rs` |
-| 4.3–4.5 Evidence objects and validation | `apti-core/src/model.rs` |
-| 7 Effective expiry, quorum, suspension, allowlist | `apti-core/src/expiry.rs`, `policy.rs` (Table 1 defaults) |
-| 3.2 Operator resolution (verified link, else PSL) | `aptid/src/client.rs` |
-| 5.1 Activities, 8 origin, replay and newer-`updated` rules | `aptid/src/inbox.rs`, `db.rs` (`upsert_evidence`) |
-| 5.2 Addressing, 5.3 batching | `aptid/src/publish.rs` |
-| 5.3 `activeObjects` and pull sync | `aptid/src/ap.rs`, `aptid/src/sync.rs` |
-| 8 HTTP signatures | `aptid/src/httpsig.rs` |
-| 9 Aggregation, 11 retention | `aptid/src/engine.rs`, `aptid/src/api.rs` |
-| Appendix D control socket | `aptid/src/control.rs`, `apti-tui` |
-| Appendix D internal API: sensors and enforcement | `aptid/src/api.rs`, `aptid/src/allowlist.rs`, `apti-fail2ban`, `apti-rspamd` |
-| Hub mode: auto follow-back, TLP ingest cap, auto-trust, node directory | `aptid/src/hub.rs`, `aptid/src/inbox.rs`, `aptid/src/api.rs` (`/api/v1/nodes`), `apti-statsd` |
+| 4.1 Normalisation, 10 special-purpose rejection | `pubsec-core/src/normalize.rs` |
+| 4.3–4.5 Evidence objects and validation | `pubsec-core/src/model.rs` |
+| 7 Effective expiry, quorum, suspension, allowlist | `pubsec-core/src/expiry.rs`, `policy.rs` (Table 1 defaults) |
+| 3.2 Operator resolution (verified link, else PSL) | `pubsecd/src/client.rs` |
+| 5.1 Activities, 8 origin, replay and newer-`updated` rules | `pubsecd/src/inbox.rs`, `db.rs` (`upsert_evidence`) |
+| 5.2 Addressing, 5.3 batching | `pubsecd/src/publish.rs` |
+| 5.3 `activeObjects` and pull sync | `pubsecd/src/ap.rs`, `pubsecd/src/sync.rs` |
+| 8 HTTP signatures | `pubsecd/src/httpsig.rs` |
+| 9 Aggregation, 11 retention | `pubsecd/src/engine.rs`, `pubsecd/src/api.rs` |
+| Appendix D control socket | `pubsecd/src/control.rs`, `pubsec-tui` |
+| Appendix D internal API: sensors and enforcement | `pubsecd/src/api.rs`, `pubsecd/src/allowlist.rs`, `pubsec-fail2ban`, `pubsec-rspamd` |
+| Hub mode: auto follow-back, TLP ingest cap, auto-trust, node directory | `pubsecd/src/hub.rs`, `pubsecd/src/inbox.rs`, `pubsecd/src/api.rs` (`/api/v1/nodes`), `pubsec-statsd` |
 
 ## Tests
 
@@ -879,7 +896,7 @@ cargo test --workspace
   `indicatorRefs`). Also HTTP signature round trip and tampering, the database
   upsert rules (withdrawn objects cannot be revived, foreign publishers are
   ignored), and `activeObjects` paging.
-- **`crates/aptid/tests/integration.rs`:**
+- **`crates/pubsecd/tests/integration.rs`:**
   - **Local pipeline:** the full path through the REST API, the batcher, the
     engine and the control socket.
   - **Observation TLP:** requested TLPs replace the behaviour default, RED
@@ -901,55 +918,55 @@ cargo test --workspace
     entries (one per behaviour, sorted by start), publishing actors and
     their display details, unpublished observations and revoked indicators
     left out, TLP, window and filters, local allowlist.
-- **`crates/aptid/tests/audit.rs`:** the audit log: nothing is logged when
+- **`crates/pubsecd/tests/audit.rs`:** the audit log: nothing is logged when
   disabled; a push, the published Sighting, activation, an allowlist entry
   from the control socket, suspension, removal over the REST API and
   re-activation are logged with their origin; a newline in a summary is
   escaped; a recompute without changes logs nothing. Unit tests in
-  `aptid/src/audit.rs` cover the active-list diff.
-- **`crates/apti-fail2ban`:**
+  `pubsecd/src/audit.rs` cover the active-list diff.
+- **`crates/pubsec-fail2ban`:**
   - **Unit tests:** fail2ban log parsing and jail mapping, the log tailer
     (rotation, truncation, resume), and the pull re-emit logic.
-  - **End-to-end test** against an in-process aptid: fail2ban log → push →
+  - **End-to-end test** against an in-process pubsecd: fail2ban log → push →
     Sighting → pull → ban file, including a dynamic allowlist and an outage
     followed by a restart.
   - **Manual check:** the shipped filter was verified with
     `fail2ban-regex` (fail2ban 1.1.0).
-- **`crates/apti-allowlist`:**
+- **`crates/pubsec-allowlist`:**
   - **Unit tests:** config validation, file parsing and the reconcile plan
     (restricted and expired entries, ownership, `prune_all`, TLP and
     renewal of published entries).
-  - **End-to-end tests** against an in-process aptid: import, edits,
+  - **End-to-end tests** against an in-process pubsecd: import, edits,
     restoring removed entries, the removal guards, append mode, waiting
     for a stable file, an outage, and published entries (TLP, summary
     published but source not, one batched `Create`, rejected values,
     renewal, TLP change, missing `publish` scope).
-- **`crates/apti-rspamd`:**
+- **`crates/pubsec-rspamd`:**
   - **Unit tests:** config validation, report parsing, the reputation
     window (ignored symbols, cooldown, IPv6 prefixes, skipped senders,
     bounded state), the envelope-from rule (SPF required, zero-score skip
     symbols, ignored and invalid domains, distinct senders, TLP per rule),
     map rendering and conditional requests.
-  - **End-to-end test** against an in-process aptid: reports → push →
+  - **End-to-end test** against an in-process pubsecd: reports → push →
     Sighting → map file, including the shared secret, the feedback-loop
     guard, a forged and an authenticated envelope sender, separate TLPs for
     IPs and domains, an allowlist that removes the IP from the map, `304`
     responses and an outage.
   - **Manual check:** the Lua plugin and the multimap rules were verified
     with Rspamd 4.2.1: all four symbols match, a message that is bad only
-    because of `APTI_*` symbols is not reported, and repeated spam is. With
+    because of `PUBSEC_*` symbols is not reported, and repeated spam is. With
     real SPF records: an SPF-authenticated envelope-from domain is reported
     with its own TLP, a forged one is skipped, and `gmail.com` is skipped
     via the zero-score `FREEMAIL_ENVFROM`.
 
-- **`crates/apti-dashboard`:**
+- **`crates/pubsec-dashboard`:**
   - **Unit tests:** config validation, window boundaries, distinct
     counting per behaviour, origin and country, colour classes and legend,
     prefix and domain lookup, the vendored map, HTML and `</script>`
     escaping, the CSP hashes, round trip of the embedded data, the country
     details (observables, countries, actor labels, findings), and that no
     IP or domain ends up in the page with `show_observables = false`.
-  - **End-to-end test** against an in-process aptid and a generated MaxMind
+  - **End-to-end test** against an in-process pubsecd and a generated MaxMind
     DB (IPv4 and IPv6): push → Sighting plus federated evidence → timeline
     → page, including a token without `read` scope, TLP filtering, earlier
     windows, skipped domains, the country details with local and remote
@@ -959,7 +976,7 @@ cargo test --workspace
     combinations of country, behaviour, origin and frame, the number of
     observables in the details table matched the country's count.
 
-- **`aptid` hub mode** (`crates/aptid/tests/integration.rs`, `hub_mode`,
+- **`pubsecd` hub mode** (`crates/pubsecd/tests/integration.rs`, `hub_mode`,
   `hub_mode_manual_approval`): a node follows the hub and the hub follows it
   back and trusts it; the hub ingests only TLP:CLEAR (a TLP:GREEN sighting is
   dropped); a single node does not reach the `k = 2` quorum and a second
@@ -969,13 +986,13 @@ cargo test --workspace
   it, withdraws the auto-trust and the observable drops below the quorum; and
   with manual approval a pending follower is neither followed back nor
   trusted until approved.
-- **`crates/apti-statsd`:**
+- **`crates/pubsec-statsd`:**
   - **Unit tests:** config validation, aggregate computation, the page
     (no raw observable is rendered, the CSP matches the inline style, the
     stale banner), the rate limiter (window reset, IPv6 /64 buckets, bounded
     client table), the client address (`X-Forwarded-For` ignored unless
     trusted, last entry used when trusted) and conditional requests.
-  - **End-to-end test** against an in-process aptid: the poller fetches with a
+  - **End-to-end test** against an in-process pubsecd: the poller fetches with a
     `max_tlp = "clear"` token, so only the TLP:CLEAR active entry is counted;
     the hub's active list and timeline are not served (`404`); the page shows
     aggregates with no raw observable; `ETag` / `304`; per-client rate

@@ -1,34 +1,34 @@
-# A public AP-TI hub: aptid in hub mode + apti-statsd (public statistics page
+# A public AP-TI hub: pubsecd in hub mode + pubsec-statsd (public statistics page
 # and connected-node directory) behind Caddy for TLS.
 #
 #   cp .env.example .env
-#   cp config/aptid-hub.example.toml config/aptid-hub.toml       # set [instance]
-#   cp config/apti-statsd.example.toml config/apti-statsd.toml
+#   cp config/pubsecd-hub.example.toml config/pubsecd-hub.toml       # set [instance]
+#   cp config/pubsec-statsd.example.toml config/pubsec-statsd.toml
 #   cp Caddyfile.hub.example Caddyfile.hub                       # set hosts
 #   docker compose -f compose.hub.example.yaml build
 #   docker compose -f compose.hub.example.yaml up -d
-#   # create a read token (scope read, max_tlp "clear") for apti-statsd and
-#   # put its secret in config/apti-statsd.toml:
-#   docker compose -f compose.hub.example.yaml exec aptid apti-tui --socket /run/aptid/control.sock
-name: apti-hub
+#   # create a read token (scope read, max_tlp "clear") for pubsec-statsd and
+#   # put its secret in config/pubsec-statsd.toml:
+#   docker compose -f compose.hub.example.yaml exec pubsecd pubsec-tui --socket /run/pubsecd/control.sock
+name: pubsec-hub
 
 services:
-  aptid:
+  pubsecd:
     build:
       context: .
-      dockerfile: Dockerfile.aptid
+      dockerfile: Dockerfile.pubsecd
       args:
-        APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
-    image: apti/aptid:${APTI_VERSION}
+        PUBSEC_VERSION: ${PUBSEC_VERSION:?set PUBSEC_VERSION in .env}
+    image: pubsec/pubsecd:${PUBSEC_VERSION}
     restart: unless-stopped
     volumes:
-      - ./config/aptid-hub.toml:/etc/aptid/config.toml:ro
-      - aptid-data:/var/lib/aptid
-      - aptid-run:/run/aptid
+      - ./config/pubsecd-hub.toml:/etc/pubsecd/config.toml:ro
+      - pubsecd-data:/var/lib/pubsecd
+      - pubsecd-run:/run/pubsecd
     ports:
       # ActivityPub listener: Caddy passes the Host header through.
       - "127.0.0.1:8080:8080"
-      # Internal REST API: reached by apti-statsd over the compose network.
+      # Internal REST API: reached by pubsec-statsd over the compose network.
       - "127.0.0.1:8081:8081"
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /api/v1/health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"ok\"' <&3"]
@@ -37,27 +37,27 @@ services:
       retries: 3
       start_period: 10s
 
-  apti-statsd:
+  pubsec-statsd:
     build:
       context: .
-      dockerfile: Dockerfile.apti-statsd
+      dockerfile: Dockerfile.pubsec-statsd
       args:
-        APTI_VERSION: ${APTI_VERSION:?set APTI_VERSION in .env}
-    image: apti/apti-statsd:${APTI_VERSION}
+        PUBSEC_VERSION: ${PUBSEC_VERSION:?set PUBSEC_VERSION in .env}
+    image: pubsec/pubsec-statsd:${PUBSEC_VERSION}
     restart: unless-stopped
     depends_on:
-      aptid:
+      pubsecd:
         condition: service_healthy
     volumes:
-      - ./config/apti-statsd.toml:/etc/apti-statsd/config.toml:ro
-      # The rendered page and node directory, served by Caddy. apti-statsd
+      - ./config/pubsec-statsd.toml:/etc/pubsec-statsd/config.toml:ro
+      # The rendered page and node directory, served by Caddy. pubsec-statsd
       # publishes no port of its own.
-      - statsd-public:/var/lib/apti-statsd/public
+      - statsd-public:/var/lib/pubsec-statsd/public
 
   caddy:
     image: caddy:2
     restart: unless-stopped
-    depends_on: [aptid, apti-statsd]
+    depends_on: [pubsecd, pubsec-statsd]
     ports:
       - "80:80"
       - "443:443"
@@ -69,8 +69,8 @@ services:
       - caddy-config:/config
 
 volumes:
-  aptid-data:
+  pubsecd-data:
   statsd-public:
-  aptid-run:
+  pubsecd-run:
   caddy-data:
   caddy-config:

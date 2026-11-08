@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/apti-core", "crates/aptid", "crates/apti-tui", "crates/apti-fail2ban", "crates/apti-allowlist", "crates/apti-rspamd", "crates/apti-dashboard", "crates/apti-statsd"]
+members = ["crates/pubsec-core", "crates/pubsecd", "crates/pubsec-tui", "crates/pubsec-fail2ban", "crates/pubsec-allowlist", "crates/pubsec-rspamd", "crates/pubsec-dashboard", "crates/pubsec-statsd"]
 
 [workspace.package]
 version = "2026.10.10"
@@ -14,7 +14,7 @@ license = "MIT OR Apache-2.0"
 opt-level = 2
 
 [workspace.dependencies]
-apti-core = { path = "crates/apti-core" }
+pubsec-core = { path = "crates/pubsec-core" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4", features = ["derive"] }

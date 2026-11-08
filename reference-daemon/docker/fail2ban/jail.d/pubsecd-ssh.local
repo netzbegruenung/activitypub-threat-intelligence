@@ -1,0 +1,11 @@
+# Ban IPs from the pubsecd active list (written by `pubsec-fail2ban pull`).
+# bantime must exceed refresh_secs + interval_secs of [pull] (1800 + 300).
+[pubsecd-ssh]
+enabled  = true
+filter   = pubsec
+logpath  = /var/log/pubsec-fail2ban/ssh.log
+port     = ssh
+maxretry = 1
+findtime = 3600
+bantime  = 3600
+bantime.increment = false

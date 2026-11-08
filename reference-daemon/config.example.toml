@@ -1,9 +1,9 @@
-# aptid example configuration.
+# pubsecd example configuration.
 #
 # This file holds bootstrap settings and policy *defaults*. Policy edited at
-# runtime with apti-tui (trust, weights, k/T/M, TLP) is stored in the
+# runtime with pubsec-tui (trust, weights, k/T/M, TLP) is stored in the
 # database and takes precedence over the values below. REST API tokens are
-# managed only in apti-tui.
+# managed only in pubsec-tui.
 
 [instance]
 # Public base URL of the ActivityPub endpoints (terminate TLS in a reverse
@@ -18,9 +18,9 @@ organization = "Example Org"
 contact = "abuse@example.net"
 
 [storage]
-database = "/var/lib/aptid/aptid.sqlite"
+database = "/var/lib/pubsecd/pubsecd.sqlite"
 # RSA key of the Service actor; generated on first start (mode 0600).
-key_file = "/var/lib/aptid/actor.pem"
+key_file = "/var/lib/pubsecd/actor.pem"
 
 [public]
 # ActivityPub listener (behind the reverse proxy).
@@ -30,13 +30,13 @@ max_body_bytes = 4194304
 [api]
 # Organisation-internal REST API. Never expose it to the Internet.
 bind = "127.0.0.1:8081"
-# Bearer tokens are created in apti-tui (Tokens tab). The daemon generates
+# Bearer tokens are created in pubsec-tui (Tokens tab). The daemon generates
 # the secret, shows it once and stores only its SHA-512 hash in the database.
 
 [control]
-# Management socket for apti-tui. Peers are checked with SO_PEERCRED:
+# Management socket for pubsec-tui. Peers are checked with SO_PEERCRED:
 # the daemon's own uid and root are always allowed.
-socket = "/run/aptid/control.sock"
+socket = "/run/pubsecd/control.sock"
 mode = "0660"
 allowed_uids = []
 allowed_gids = []

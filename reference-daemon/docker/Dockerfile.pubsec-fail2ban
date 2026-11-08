@@ -1,0 +1,25 @@
+# pubsec-fail2ban image: the connector only. fail2ban itself runs in its own
+# container (Dockerfile.fail2ban); the two exchange log files over volumes.
+# The binary is glibc-linked, so this is Debian (not Alpine). Binary comes
+# from the GitHub release; nothing is pushed to a registry.
+ARG DEBIAN_TAG=trixie-slim
+
+FROM debian:${DEBIAN_TAG} AS fetch
+ARG PUBSEC_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /dl
+RUN test -n "$PUBSEC_VERSION" || { echo "set PUBSEC_VERSION (e.g. v2026.10.9)" >&2; exit 1; }
+RUN base="https://github.com/netzbegruenung/activitypub-threat-intelligence/releases/download/${PUBSEC_VERSION}" \
+ && for f in SHA256SUMS pubsec-fail2ban-${PUBSEC_VERSION}-linux-x86_64; do curl -fsSLO "$base/$f"; done \
+ && grep -E " pubsec-fail2ban-${PUBSEC_VERSION}-linux-x86_64\$" SHA256SUMS | sha256sum -c - \
+ && install -m 0755 pubsec-fail2ban-${PUBSEC_VERSION}-linux-x86_64 /pubsec-fail2ban
+
+FROM debian:${DEBIAN_TAG}
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /var/lib/pubsec-fail2ban /var/log/pubsec-fail2ban
+COPY --from=fetch /pubsec-fail2ban /usr/local/bin/
+COPY docker/entrypoint-pubsec-fail2ban.sh /usr/local/bin/entrypoint
+VOLUME ["/var/lib/pubsec-fail2ban", "/var/log/pubsec-fail2ban"]
+ENTRYPOINT ["tini", "--", "entrypoint"]

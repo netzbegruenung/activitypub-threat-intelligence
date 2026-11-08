@@ -94,10 +94,10 @@ if [ "\$1" = configure ]; then
     fi
 fi
 EOF
-    if [ "$pkg" = apti-dashboard ]; then
+    if [ "$pkg" = pubsec-dashboard ]; then
         cat >>"$d/DEBIAN/postinst" <<'EOF'
 if [ "$1" = configure ]; then
-    install -d -o apti-dashboard -g apti-dashboard -m 0755 /var/www/apti-dashboard
+    install -d -o pubsec-dashboard -g pubsec-dashboard -m 0755 /var/www/pubsec-dashboard
 fi
 EOF
     fi
@@ -166,97 +166,97 @@ pack() {
     echo "built ${pkg}_${version}_amd64.deb"
 }
 
-# ------------------------------------------------------------------ aptid
-begin_pkg aptid
-add_bin aptid
-add_bin apti-tui
-add_conf "$root/config.example.toml" /etc/aptid/config.toml
-add_unit aptid.service enable
+# ------------------------------------------------------------------ pubsecd
+begin_pkg pubsecd
+add_bin pubsecd
+add_bin pubsec-tui
+add_conf "$root/config.example.toml" /etc/pubsecd/config.toml
+add_unit pubsecd.service enable
 PKG_DESC="ActivityPub threat intelligence daemon"
-PKG_LONG="aptid federates threat intelligence over ActivityPub: it collects
+PKG_LONG="pubsecd federates threat intelligence over ActivityPub: it collects
 observations from connectors, applies policy and publishes and consumes
 signed activities.
 
-This package also contains apti-tui, the terminal UI used to administer a
-running aptid over its control socket."
+This package also contains pubsec-tui, the terminal UI used to administer a
+running pubsecd over its control socket."
 write_control
-write_maintscripts aptid /var/lib/aptid
+write_maintscripts pubsecd /var/lib/pubsecd
 pack
 
-# ---------------------------------------------------------- apti-fail2ban
-begin_pkg apti-fail2ban
-add_bin apti-fail2ban
-add_conf "$root/crates/apti-fail2ban/apti-fail2ban.example.toml" \
-    /etc/apti-fail2ban/config.toml
-add_conf "$root/crates/apti-fail2ban/fail2ban/filter.d/apti.conf" \
-    /etc/fail2ban/filter.d/apti.conf
-add_example "$root/crates/apti-fail2ban/fail2ban/jail.d/aptid-ssh.conf.example"
-add_unit apti-fail2ban.service enable
+# ---------------------------------------------------------- pubsec-fail2ban
+begin_pkg pubsec-fail2ban
+add_bin pubsec-fail2ban
+add_conf "$root/crates/pubsec-fail2ban/pubsec-fail2ban.example.toml" \
+    /etc/pubsec-fail2ban/config.toml
+add_conf "$root/crates/pubsec-fail2ban/fail2ban/filter.d/pubsec.conf" \
+    /etc/fail2ban/filter.d/pubsec.conf
+add_example "$root/crates/pubsec-fail2ban/fail2ban/jail.d/pubsecd-ssh.conf.example"
+add_unit pubsec-fail2ban.service enable
 PKG_RECOMMENDS="fail2ban"
-PKG_DESC="fail2ban connector for aptid"
-PKG_LONG="Follows the fail2ban log and reports bans to aptid, and writes the
-active list back into files that fail2ban reads through the shipped apti
+PKG_DESC="fail2ban connector for pubsecd"
+PKG_LONG="Follows the fail2ban log and reports bans to pubsecd, and writes the
+active list back into files that fail2ban reads through the shipped pubsec
 filter."
 write_control
-write_maintscripts apti-fail2ban /var/lib/apti-fail2ban
+write_maintscripts pubsec-fail2ban /var/lib/pubsec-fail2ban
 pack
 
-# ------------------------------------------------------------ apti-rspamd
-begin_pkg apti-rspamd
-add_bin apti-rspamd
-add_conf "$root/crates/apti-rspamd/apti-rspamd.example.toml" \
-    /etc/apti-rspamd/config.toml
-add_conf "$root/crates/apti-rspamd/rspamd/lua.local.d/apti.lua" \
-    /etc/rspamd/lua.local.d/apti.lua
-add_conf "$root/crates/apti-rspamd/rspamd/modules.local.d/apti.conf" \
-    /etc/rspamd/modules.local.d/apti.conf
-add_example "$root/crates/apti-rspamd/rspamd/local.d/multimap.conf.example"
-add_unit apti-rspamd.service enable
+# ------------------------------------------------------------ pubsec-rspamd
+begin_pkg pubsec-rspamd
+add_bin pubsec-rspamd
+add_conf "$root/crates/pubsec-rspamd/pubsec-rspamd.example.toml" \
+    /etc/pubsec-rspamd/config.toml
+add_conf "$root/crates/pubsec-rspamd/rspamd/lua.local.d/pubsec.lua" \
+    /etc/rspamd/lua.local.d/pubsec.lua
+add_conf "$root/crates/pubsec-rspamd/rspamd/modules.local.d/pubsec.conf" \
+    /etc/rspamd/modules.local.d/pubsec.conf
+add_example "$root/crates/pubsec-rspamd/rspamd/local.d/multimap.conf.example"
+add_unit pubsec-rspamd.service enable
 PKG_RECOMMENDS="rspamd"
-PKG_DESC="Rspamd connector for aptid"
-PKG_LONG="Turns Rspamd scan results into observations for aptid and serves the
+PKG_DESC="Rspamd connector for pubsecd"
+PKG_LONG="Turns Rspamd scan results into observations for pubsecd and serves the
 active list back to Rspamd as multimaps."
 write_control
-write_maintscripts apti-rspamd /var/lib/apti-rspamd
+write_maintscripts pubsec-rspamd /var/lib/pubsec-rspamd
 pack
 
-# ------------------------------------------------------------ apti-statsd
-begin_pkg apti-statsd
-add_bin apti-statsd
-add_conf "$root/crates/apti-statsd/apti-statsd.example.toml" \
-    /etc/apti-statsd/config.toml
-add_unit apti-statsd.service enable
+# ------------------------------------------------------------ pubsec-statsd
+begin_pkg pubsec-statsd
+add_bin pubsec-statsd
+add_conf "$root/crates/pubsec-statsd/pubsec-statsd.example.toml" \
+    /etc/pubsec-statsd/config.toml
+add_unit pubsec-statsd.service enable
 PKG_DESC="public statistics page for an AP-TI hub"
 PKG_LONG="Polls a hub's internal REST API and publishes aggregates over its
 TLP:CLEAR dataset as a self-contained statistics page and a JSON directory of
 connected nodes."
 write_control
-write_maintscripts apti-statsd /var/lib/apti-statsd
+write_maintscripts pubsec-statsd /var/lib/pubsec-statsd
 pack
 
-# --------------------------------------------------------- apti-allowlist
-begin_pkg apti-allowlist
-add_bin apti-allowlist
-add_conf "$root/crates/apti-allowlist/apti-allowlist.example.toml" \
-    /etc/apti-allowlist/config.toml
-add_unit apti-allowlist.service enable
-PKG_DESC="allowlist sync for aptid"
-PKG_LONG="Keeps the aptid allowlist in sync with a text file, so networks and
+# --------------------------------------------------------- pubsec-allowlist
+begin_pkg pubsec-allowlist
+add_bin pubsec-allowlist
+add_conf "$root/crates/pubsec-allowlist/pubsec-allowlist.example.toml" \
+    /etc/pubsec-allowlist/config.toml
+add_unit pubsec-allowlist.service enable
+PKG_DESC="allowlist sync for pubsecd"
+PKG_LONG="Keeps the pubsecd allowlist in sync with a text file, so networks and
 domains that must never be reported or banned stay exempt."
 write_control
-write_maintscripts apti-allowlist /var/lib/apti-allowlist
+write_maintscripts pubsec-allowlist /var/lib/pubsec-allowlist
 pack
 
-# --------------------------------------------------------- apti-dashboard
-begin_pkg apti-dashboard
-add_bin apti-dashboard
-add_conf "$root/crates/apti-dashboard/apti-dashboard.example.toml" \
-    /etc/apti-dashboard/config.toml
-add_unit apti-dashboard.service
-add_unit apti-dashboard.timer enable
-PKG_DESC="static HTML threat map for aptid"
-PKG_LONG="Renders the aptid active list into a self-contained HTML page. The
+# --------------------------------------------------------- pubsec-dashboard
+begin_pkg pubsec-dashboard
+add_bin pubsec-dashboard
+add_conf "$root/crates/pubsec-dashboard/pubsec-dashboard.example.toml" \
+    /etc/pubsec-dashboard/config.toml
+add_unit pubsec-dashboard.service
+add_unit pubsec-dashboard.timer enable
+PKG_DESC="static HTML threat map for pubsecd"
+PKG_LONG="Renders the pubsecd active list into a self-contained HTML page. The
 shipped timer re-renders the page every 15 minutes."
 write_control
-write_maintscripts apti-dashboard /var/lib/apti-dashboard
+write_maintscripts pubsec-dashboard /var/lib/pubsec-dashboard
 pack

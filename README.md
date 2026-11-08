@@ -93,7 +93,7 @@ alone.
 Every evidence object carries a [TLP 2.0](https://www.first.org/tlp/) level.
 The publisher sets it (`default_tlp`, or `tlp` per behaviour; default
 `green`). A local sensor can also request a TLP per observation, e.g.
-`apti-rspamd` for sending IPs and spam domains separately. The level decides
+`pubsec-rspamd` for sending IPs and spam domains separately. The level decides
 how the object is delivered and who can fetch it:
 
 | TLP | Delivered to / readable by |
@@ -132,20 +132,20 @@ The [`reference-daemon`](reference-daemon/) Cargo workspace contains:
 
 | Component | Role |
 |---|---|
-| `apti-core` | Library: data model, normalisation, trust policy and effective-expiry engine. No I/O. |
-| `aptid` | Daemon: ActivityPub federation, SQLite storage, internal REST API for sensors and enforcement, management control socket. |
-| `apti-tui` | Terminal UI for following peers, setting trust, working through the review queue and managing allowlists. |
-| `apti-fail2ban` | Connector: reports fail2ban bans to `aptid` and writes the active list back to files that fail2ban bans from. |
-| `apti-allowlist` | Connector: keeps the local allowlist in sync with a hand-edited text file (append or source-of-truth mode). |
-| `apti-rspamd` | Connector: reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to `aptid` (with a separate TLP for each), and serves the active list to Rspamd as multimap files (IPs, URL and sender domains). |
-| `apti-dashboard` | Tool: renders a static HTML world map of where findings come from (GeoIP), with a time slider and filters for behaviour and own vs. federated evidence. |
-| `apti-statsd` | Connector: publishes aggregate statistics over a hub's TLP:CLEAR dataset — a statistics page (no individual observables) and a JSON directory of the hub's connected nodes. |
+| `pubsec-core` | Library: data model, normalisation, trust policy and effective-expiry engine. No I/O. |
+| `pubsecd` | Daemon: ActivityPub federation, SQLite storage, internal REST API for sensors and enforcement, management control socket. |
+| `pubsec-tui` | Terminal UI for following peers, setting trust, working through the review queue and managing allowlists. |
+| `pubsec-fail2ban` | Connector: reports fail2ban bans to `pubsecd` and writes the active list back to files that fail2ban bans from. |
+| `pubsec-allowlist` | Connector: keeps the local allowlist in sync with a hand-edited text file (append or source-of-truth mode). |
+| `pubsec-rspamd` | Connector: reports IPs and SPF-authenticated envelope-from domains that keep sending spam according to Rspamd to `pubsecd` (with a separate TLP for each), and serves the active list to Rspamd as multimap files (IPs, URL and sender domains). |
+| `pubsec-dashboard` | Tool: renders a static HTML world map of where findings come from (GeoIP), with a time slider and filters for behaviour and own vs. federated evidence. |
+| `pubsec-statsd` | Connector: publishes aggregate statistics over a hub's TLP:CLEAR dataset — a statistics page (no individual observables) and a JSON directory of the hub's connected nodes. |
 
 A typical deployment works like this:
 
-1. Local sensors (for example fail2ban) push observations to `aptid`.
-2. `aptid` batches them into Sightings and federates them to followers.
-3. `aptid` combines its own evidence with trusted peer evidence into an active
+1. Local sensors (for example fail2ban) push observations to `pubsecd`.
+2. `pubsecd` batches them into Sightings and federates them to followers.
+3. `pubsecd` combines its own evidence with trusted peer evidence into an active
    list.
 4. Enforcement tools pull that list.
 

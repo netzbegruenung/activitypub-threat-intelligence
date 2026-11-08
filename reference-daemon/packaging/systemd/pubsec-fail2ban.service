@@ -1,0 +1,38 @@
+[Unit]
+Description=AP-TI fail2ban connector
+Documentation=https://github.com/netzbegruenung/activitypub-threat-intelligence
+After=network-online.target fail2ban.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pubsec-fail2ban
+Group=pubsec-fail2ban
+# fail2ban's log is usually root:adm 0640.
+SupplementaryGroups=adm
+ExecStart=/usr/bin/pubsec-fail2ban --config /etc/pubsec-fail2ban/config.toml run
+Restart=on-failure
+RestartSec=5
+StateDirectory=pubsec-fail2ban
+StateDirectoryMode=0750
+LogsDirectory=pubsec-fail2ban
+LogsDirectoryMode=0755
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
