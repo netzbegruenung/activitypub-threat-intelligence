@@ -20,7 +20,6 @@ const CSS: &str = r#"
 * { box-sizing: border-box; }
 html { background:var(--bg); color:var(--fg); font:16px/1.6 "DejaVu Sans Mono","Liberation Mono","Courier New",monospace; }
 body { margin:0; text-shadow:0 0 6px rgba(51,255,153,.35); }
-body::after { content:""; position:fixed; inset:0; pointer-events:none; z-index:1; background:radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.75) 100%); }
 .wrap { max-width:56rem; margin-inline:auto; padding:2.5rem 1.25rem 5rem; }
 pre.banner { color:var(--fg); font-size:clamp(.4rem,1.75vw,.85rem); line-height:1.1; margin:0 0 .75rem; overflow-x:clip; }
 header { margin-bottom:2rem; }
