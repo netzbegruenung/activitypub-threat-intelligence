@@ -143,14 +143,13 @@ fn node_table(rows: &[crate::stats::NodeRow]) -> String {
         return "<p class=\"empty\">No node is connected.</p>".to_string();
     }
     let mut h = String::from(
-        "<table><thead><tr><th>Node</th><th>Operator</th><th class=\"n\">Evidence</th></tr></thead><tbody>",
+        "<table><thead><tr><th>Actor</th><th class=\"n\">Evidence</th></tr></thead><tbody>",
     );
     for r in rows {
         let _ = write!(
             h,
-            "<tr><td>{}</td><td>{}</td><td class=\"n\">{}</td></tr>",
+            "<tr><td>{}</td><td class=\"n\">{}</td></tr>",
             escape(&r.label),
-            escape(r.operator.as_deref().unwrap_or("—")),
             r.evidence
         );
     }
@@ -250,8 +249,7 @@ pub fn page(p: &Page) -> String {
 <section>
 <h2>Connected nodes</h2>
 {nodes_table}
-<p class="note">Nodes the hub has accepted a follow from, as they describe themselves. The
-operator is self-declared and is not verified.</p>
+<p class="note">Nodes the hub has accepted a follow from, as they describe themselves.</p>
 </section>
 <footer>
 <p>Figures are aggregates over the hub&rsquo;s dataset. Individual IP addresses,
@@ -432,7 +430,7 @@ mod tests {
         let html = render(false);
         assert!(html.contains("Connected nodes"));
         assert!(html.contains("feed@peer.example"));
-        assert!(html.contains("Peer Org"));
+        assert!(!html.contains("Peer Org"), "the operator is not a column");
         assert!(page(&Page {
             title: "Hub",
             generated: Utc::now(),

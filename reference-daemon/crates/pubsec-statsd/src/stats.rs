@@ -18,7 +18,6 @@ pub type BehaviorCounts = Vec<(Behavior, usize)>;
 #[derive(Debug, Clone)]
 pub struct NodeRow {
     pub label: String,
-    pub operator: Option<String>,
     pub evidence: u64,
 }
 
@@ -32,7 +31,6 @@ impl NodeRow {
             .to_string();
         Self {
             label,
-            operator: n.operator.clone(),
             evidence: n.evidence,
         }
     }
@@ -40,7 +38,7 @@ impl NodeRow {
 
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
-    /// Connected nodes (the hub's follow list).
+    /// Connected nodes (the hub's follower list).
     pub nodes: usize,
     /// The connected nodes themselves, most evidence first.
     pub node_list: Vec<NodeRow>,

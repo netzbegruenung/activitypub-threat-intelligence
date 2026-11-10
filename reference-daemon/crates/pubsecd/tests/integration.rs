@@ -1384,6 +1384,10 @@ allowlist = ["8.8.8.8"]
 /// A participant node that auto-approves, so the hub's follow-back is
 /// accepted and its CLEAR evidence is delivered to the hub.
 async fn spawn_open_node(dir: &Path, name: &str) -> Daemon {
+    spawn_node_with(dir, name, false).await
+}
+
+async fn spawn_node_with(dir: &Path, name: &str, manual: bool) -> Daemon {
     let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = public.local_addr().unwrap().port();
@@ -1407,7 +1411,7 @@ allow_http = true
 allow_private_addresses = true
 sync_interval_secs = 3600
 [publish]
-manually_approves_followers = false
+manually_approves_followers = {manual}
 batch_interval_secs = 3600
 [policy]
 recompute_interval_secs = 3600
@@ -1666,6 +1670,36 @@ async fn operator_policy(d: &Daemon, operator: &str) -> Option<OperatorPolicy> {
             .and_then(|o| o.default_policy),
         r => panic!("{r:?}"),
     }
+}
+
+/// A node is connected as soon as its follow of the hub is accepted. The
+/// directory must list it even when it never accepts the hub's follow-back,
+/// because its evidence reaches the hub either way.
+#[tokio::test]
+async fn nodes_without_accepted_follow_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = spawn_hub(dir.path(), "hub").await;
+    // Manual approval at the node leaves the hub's follow-back pending.
+    let n = spawn_node_with(dir.path(), "n", true).await;
+    let n_actor = n.state.urls.actor.clone();
+    ctl_ok(
+        &n,
+        Request::Follow {
+            handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+        },
+    )
+    .await;
+    let node = wait_for("hub lists n as connected", || async {
+        api_nodes(&h, READ)
+            .await
+            .into_iter()
+            .find(|v| v["actor"] == n_actor)
+    })
+    .await;
+    assert_eq!(node["state"], "accepted");
+    assert_eq!(node["followBack"], "pending");
+    h.shutdown();
+    n.shutdown();
 }
 
 /// Hub mode with manual approval: a pending follower is neither followed
