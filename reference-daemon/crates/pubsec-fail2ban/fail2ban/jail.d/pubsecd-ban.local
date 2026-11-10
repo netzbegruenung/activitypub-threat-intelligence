@@ -6,14 +6,15 @@
 # (1800 + 300 s) a bantime of 3600 s keeps bans continuous; after an entry
 # expires in pubsecd the ban lapses within one bantime.
 #
-# Add this jail to `ignore_jails` in pubsec-fail2ban's [push] section.
+# This jail is listed in `ignore_jails` of pubsec-fail2ban's [push] section, so
+# imported bans are not re-published as own sightings.
 
-[pubsecd-ssh]
+[pubsecd-ban]
 enabled  = true
 filter   = pubsec
 logpath  = /var/log/pubsec-fail2ban/ssh.log
 backend  = polling
-port     = ssh
+port     = 0:65535
 maxretry = 1
 findtime = 3600
 bantime  = 3600

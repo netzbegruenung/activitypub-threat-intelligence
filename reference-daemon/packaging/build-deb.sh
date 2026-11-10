@@ -34,6 +34,26 @@ begin_pkg() {
     install -m 0644 "$root/../LICENSE" "$d/usr/share/doc/$pkg/copyright"
     units=
     enable_units=
+    use_debconf=
+    postinst_configure=
+    postrm_purge=
+    rm_conffiles=
+}
+
+# rm_conffile ABSOLUTE_PATH LAST_VERSION_THAT_SHIPPED_IT
+# For files that used to be dpkg conffiles and are now managed differently.
+rm_conffile() {
+    rm_conffiles="$rm_conffiles $1:$2"
+}
+
+emit_rm_conffiles() {
+    [ -n "$rm_conffiles" ] || return 0
+    for entry in $rm_conffiles; do
+        echo "if dpkg-maintscript-helper supports rm_conffile 2>/dev/null; then"
+        echo "    dpkg-maintscript-helper rm_conffile ${entry%:*} ${entry##*:} -- \"\$@\""
+        echo "fi"
+    done
+    echo
 }
 
 add_bin() {
@@ -48,6 +68,46 @@ add_conf() {
 
 add_example() {
     install -D -m 0644 "$1" "$d/usr/share/doc/$pkg/examples/$(basename "$1")"
+}
+
+add_share() {
+    install -D -m 0644 "$1" "$d/usr/share/$pkg/$2"
+}
+
+# add_debconf  (expects packaging/debconf/$pkg.{templates,config.sh,postinst.sh}
+# and the shared jail map, which is prepended to both scripts so the jail table
+# cannot drift between asking the question and writing the answer)
+add_debconf() {
+    dc=$root/packaging/debconf
+    install -m 0644 "$dc/$pkg.templates" "$d/DEBIAN/templates"
+    {
+        echo '#!/bin/sh'
+        echo 'set -e'
+        echo
+        echo '. /usr/share/debconf/confmodule'
+        echo
+        cat "$dc/$pkg.jailmap.sh"
+        echo
+        cat "$dc/$pkg.config.sh"
+    } >"$d/DEBIAN/config"
+    chmod 0755 "$d/DEBIAN/config"
+    postinst_configure=$work/$pkg.postinst-configure
+    {
+        cat "$dc/$pkg.jailmap.sh"
+        echo
+        cat "$dc/$pkg.postinst.sh"
+    } >"$postinst_configure"
+    if [ -f "$dc/$pkg.postrm-purge.sh" ]; then
+        postrm_purge=$work/$pkg.postrm-purge
+        # The package's own files are already gone at purge time, so the list of
+        # shipped jails has to be baked into the script.
+        {
+            cat "$dc/$pkg.jailmap.sh"
+            echo
+            cat "$dc/$pkg.postrm-purge.sh"
+        } >"$postrm_purge"
+    fi
+    use_debconf=1
 }
 
 # add_unit NAME [enable]
@@ -68,6 +128,9 @@ write_control() {
         echo "Maintainer: $maintainer"
         echo "Installed-Size: $size"
         echo "Depends: $depends"
+        if [ -n "${PKG_PREDEPENDS:-}" ]; then
+            echo "Pre-Depends: $PKG_PREDEPENDS"
+        fi
         if [ -n "${PKG_RECOMMENDS:-}" ]; then
             echo "Recommends: $PKG_RECOMMENDS"
         fi
@@ -77,16 +140,23 @@ write_control() {
         echo "Description: $PKG_DESC"
         printf '%s\n' "$PKG_LONG" | sed 's/^$/./; s/^/ /'
     } >"$d/DEBIAN/control"
-    unset PKG_DEPENDS PKG_RECOMMENDS PKG_DESC PKG_LONG
+    unset PKG_DEPENDS PKG_PREDEPENDS PKG_RECOMMENDS PKG_DESC PKG_LONG
 }
 
 write_maintscripts() {
     user=$1
     home=$2
-    cat >"$d/DEBIAN/postinst" <<EOF
-#!/bin/sh
-set -e
-
+    {
+        echo '#!/bin/sh'
+        echo 'set -e'
+        echo
+        emit_rm_conffiles
+        if [ -n "$use_debconf" ]; then
+            echo '. /usr/share/debconf/confmodule'
+            echo
+        fi
+    } >"$d/DEBIAN/postinst"
+    cat >>"$d/DEBIAN/postinst" <<EOF
 if [ "\$1" = configure ]; then
     if ! getent passwd $user >/dev/null; then
         adduser --system --group --home $home --no-create-home \\
@@ -101,6 +171,15 @@ if [ "$1" = configure ]; then
 fi
 EOF
     fi
+    if [ -n "$postinst_configure" ]; then
+        {
+            echo
+            echo 'if [ "$1" = configure ]; then'
+            cat "$postinst_configure"
+            echo 'fi'
+        } >>"$d/DEBIAN/postinst"
+    fi
+
     cat >>"$d/DEBIAN/postinst" <<EOF
 
 if [ "\$1" = configure ] && [ -x /usr/bin/deb-systemd-helper ]; then
@@ -127,6 +206,17 @@ fi
 exit 0
 EOF
 
+    if [ -n "$rm_conffiles" ]; then
+        {
+            echo '#!/bin/sh'
+            echo 'set -e'
+            echo
+            emit_rm_conffiles
+            echo 'exit 0'
+        } >"$d/DEBIAN/preinst"
+        chmod 0755 "$d/DEBIAN/preinst"
+    fi
+
     cat >"$d/DEBIAN/prerm" <<EOF
 #!/bin/sh
 set -e
@@ -137,10 +227,25 @@ fi
 exit 0
 EOF
 
-    cat >"$d/DEBIAN/postrm" <<EOF
-#!/bin/sh
-set -e
-
+    {
+        echo '#!/bin/sh'
+        echo 'set -e'
+        echo
+        emit_rm_conffiles
+        if [ -n "$use_debconf" ]; then
+            echo 'if [ -f /usr/share/debconf/confmodule ]; then'
+            echo '    . /usr/share/debconf/confmodule'
+            echo 'fi'
+            echo
+        fi
+        if [ -n "$postrm_purge" ]; then
+            echo 'if [ "$1" = purge ]; then'
+            cat "$postrm_purge"
+            echo 'fi'
+            echo
+        fi
+    } >"$d/DEBIAN/postrm"
+    cat >>"$d/DEBIAN/postrm" <<EOF
 if [ -d /run/systemd/system ]; then
     systemctl --system daemon-reload >/dev/null || true
 fi
@@ -186,17 +291,32 @@ pack
 # ---------------------------------------------------------- pubsec-fail2ban
 begin_pkg pubsec-fail2ban
 add_bin pubsec-fail2ban
-add_conf "$root/crates/pubsec-fail2ban/pubsec-fail2ban.example.toml" \
-    /etc/pubsec-fail2ban/config.toml
-add_conf "$root/crates/pubsec-fail2ban/fail2ban/filter.d/pubsec.conf" \
-    /etc/fail2ban/filter.d/pubsec.conf
-add_example "$root/crates/pubsec-fail2ban/fail2ban/jail.d/pubsecd-ssh.conf.example"
+f2b=$root/crates/pubsec-fail2ban/fail2ban
+for filter in "$f2b"/filter.d/*.conf; do
+    add_conf "$filter" "/etc/fail2ban/filter.d/$(basename "$filter")"
+done
+# Jails are templates, not conffiles: the postinst copies the ones the admin
+# selected into /etc/fail2ban/jail.d and never touches them again.
+for jail in "$f2b"/jail.d/*.local; do
+    add_share "$jail" "jail.d/$(basename "$jail")"
+done
+add_share "$root/crates/pubsec-fail2ban/pubsec-fail2ban.example.toml" \
+    config.toml.example
 add_unit pubsec-fail2ban.service enable
-PKG_RECOMMENDS="fail2ban"
+add_debconf
+# Up to 2026.11.7 the configuration was a dpkg conffile; it is generated from
+# the debconf answers and managed with ucf now.
+rm_conffile /etc/pubsec-fail2ban/config.toml 2026.11.7
+PKG_DEPENDS="fail2ban, ucf, debconf (>= 0.5) | debconf-2.0"
+PKG_PREDEPENDS="dpkg (>= 1.17.14)"
 PKG_DESC="fail2ban connector for pubsecd"
 PKG_LONG="Follows the fail2ban log and reports bans to pubsecd, and writes the
 active list back into files that fail2ban reads through the shipped pubsec
-filter."
+filter.
+
+The package ships filters and jails for the Apache, nginx and HAProxy access
+logs that complement the ones in the fail2ban package, and asks at install
+time which of them to enable and report."
 write_control
 write_maintscripts pubsec-fail2ban /var/lib/pubsec-fail2ban
 pack

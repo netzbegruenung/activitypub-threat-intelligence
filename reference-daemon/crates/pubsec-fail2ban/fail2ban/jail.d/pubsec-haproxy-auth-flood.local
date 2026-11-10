@@ -1,0 +1,9 @@
+# Many 401s in a short time against sites with HTTP authentication.
+[pubsec-haproxy-auth-flood]
+enabled  = true
+filter   = pubsec-haproxy-auth-flood
+port     = http,https
+backend  = systemd
+maxretry = 20
+findtime = 300
+bantime  = 1h

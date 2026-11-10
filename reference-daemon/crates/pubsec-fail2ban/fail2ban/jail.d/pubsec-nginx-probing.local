@@ -1,0 +1,9 @@
+# 404 flood from scanner path lists. Static files and app paths are excluded.
+[pubsec-nginx-probing]
+enabled  = true
+filter   = pubsec-httpd-probing
+port     = http,https
+logpath  = %(nginx_access_log)s
+maxretry = 15
+findtime = 300
+bantime  = 1h
