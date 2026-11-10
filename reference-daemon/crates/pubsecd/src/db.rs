@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use chrono::{DateTime, SecondsFormat, Utc};
+use pubsec_core::display;
 use pubsec_core::expiry::Assessment;
 use pubsec_core::policy::{BehaviorOverride, OperatorPolicy, Threshold};
 use pubsec_core::protocol::{
@@ -784,13 +785,17 @@ pub fn delete_follower(c: &Connection, actor: &str) -> anyhow::Result<bool> {
 
 pub fn list_followers(c: &Connection) -> anyhow::Result<Vec<FollowerInfo>> {
     let mut stmt = c.prepare(
-        "SELECT f.actor, f.state, f.created, a.name, a.summary FROM followers f
+        "SELECT f.actor, f.state, f.created, a.name, a.summary, a.preferred_username
+         FROM followers f
          LEFT JOIN remote_actors a ON a.id = f.actor ORDER BY f.state DESC, f.actor",
     )?;
     let rows = stmt
         .query_map([], |r| {
+            let actor: String = r.get(0)?;
+            let username: Option<String> = r.get(5)?;
             Ok(FollowerInfo {
-                actor: r.get(0)?,
+                handle: display::actor_handle(username.as_deref(), &actor),
+                actor,
                 state: r.get(1)?,
                 since: parse_ts(&r.get::<_, String>(2)?),
                 name: r.get(3)?,
@@ -1870,7 +1875,9 @@ mod tests {
             let f = list_followers(c)?;
             assert_eq!(f.len(), 2);
             assert_eq!(f[0].name.as_deref(), Some("B TI"));
+            assert_eq!(f[0].handle.as_deref(), Some("ti@b.example"));
             assert_eq!(f[0].summary, actor.summary);
+            assert_eq!(f[1].handle, None);
             assert_eq!(f[1].summary, None);
             Ok(())
         })

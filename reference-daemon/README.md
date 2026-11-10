@@ -865,9 +865,8 @@ show the position of the selected row; with a filter active it reads
 | Tab | Actions |
 |---|---|
 | Status | Counters, queues, last recompute; TLP addressing overview. `e` set the default TLP and the AMBER recipient list |
-| Following | `a` follow (`user@host` or URL), `d` unfollow, `s` full resync (also refetches the actor document, e.g. a changed contact), `i` details |
-| Followers | `a` approve, `x` reject or remove (needed for TLP:GREEN) |
-| Operators | `e` set trusted/weight (operator default or per behaviour), `t` toggle trust, `c` clear a policy, `m` override actor→operator mapping |
+| Following | One row per known actor, named by its WebFinger handle `user@host`. The dimmed operator column names the operator the row belongs to and how many actors share it, because trust applies to all of them. `a` follow (`user@host` or URL), `d` unfollow (an actor that is only known is forgotten), `s` full resync (also refetches the actor document, e.g. a changed contact), `i` details with the full actor and operator ids, `t` toggle the trust of its operator, `e` set trusted/weight (operator default or per behaviour), `c` clear a policy, `m` override actor→operator mapping |
+| Followers | Named by handle as well. `a` approve, `x` reject or remove (needed for TLP:GREEN), `i` details |
 | Behaviours | `e` set `k` (number or `off`), T, M and the publish TLP per behaviour |
 | Tokens | REST API tokens: `a` create (secret shown once), `e` edit scopes and max TLP, `n` new secret, `d` delete |
 | Review | `d` dismiss, `s` suspend `(O, b)`, `w` allowlist `O`, `h` show resolved, `⏎` lookup |
