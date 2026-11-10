@@ -543,8 +543,11 @@ impl App {
                 }
             }
             (Tab::Dashboard, 'e' | '\n') => {
+                if let Some(Reply::Followers(f)) = self.call(Request::ListFollowers) {
+                    self.data.followers = f;
+                }
                 if let Some(t) = &self.data.tlp {
-                    self.modal = Some(Modal::Form(Form::tlp(t)));
+                    self.modal = Some(Modal::Form(Form::tlp(t, &self.data.followers)));
                 }
             }
             (Tab::Tokens, 'a') => self.modal = Some(Modal::Form(Form::create_token())),

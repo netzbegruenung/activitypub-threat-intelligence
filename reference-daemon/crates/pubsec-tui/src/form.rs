@@ -4,8 +4,8 @@ use chrono::{TimeDelta, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use pubsec_core::policy::{BehaviorOverride, OperatorPolicy, Threshold};
 use pubsec_core::protocol::{
-    AllowlistScope, ApiScope, ApiTokenInfo, BehaviorPolicyInfo, NewAllowlistEntry, NewApiToken,
-    OperatorInfo, Request, TlpSettings,
+    AllowlistScope, ApiScope, ApiTokenInfo, BehaviorPolicyInfo, FollowerInfo, NewAllowlistEntry,
+    NewApiToken, OperatorInfo, Request, TlpSettings,
 };
 use pubsec_core::{Behavior, Tlp};
 use ratatui::layout::{Constraint, Layout};
@@ -48,6 +48,29 @@ pub struct Field {
     /// Allowed values; non-empty makes this a select instead of free text.
     /// An empty option stands for "use the default".
     pub options: Vec<String>,
+    /// What to show for each option; empty means show the option itself.
+    pub labels: Vec<String>,
+    /// A checklist over `options`; `value` is unused and `cursor` points at
+    /// the option the toggle key acts on.
+    pub multi: bool,
+    pub selected: Vec<bool>,
+    pub cursor: usize,
+}
+
+impl Field {
+    /// Options of a multi-select that are ticked.
+    pub fn checked(&self) -> Vec<String> {
+        self.options
+            .iter()
+            .zip(&self.selected)
+            .filter(|(_, on)| **on)
+            .map(|(o, _)| o.clone())
+            .collect()
+    }
+
+    fn shown(&self, i: usize) -> &str {
+        self.labels.get(i).map_or(&self.options[i], String::as_str)
+    }
 }
 
 pub struct Form {
@@ -64,6 +87,10 @@ fn field(label: &'static str, value: impl Into<String>, hint: &'static str) -> F
         value: value.into(),
         hint,
         options: Vec::new(),
+        labels: Vec::new(),
+        multi: false,
+        selected: Vec::new(),
+        cursor: 0,
     }
 }
 
@@ -79,6 +106,31 @@ fn select(label: &'static str, options: Vec<String>, current: &str, hint: &'stat
         value,
         hint,
         options,
+        labels: Vec::new(),
+        multi: false,
+        selected: Vec::new(),
+        cursor: 0,
+    }
+}
+
+/// A checklist over `options`, ticking those present in `current`.
+fn multi(
+    label: &'static str,
+    options: Vec<String>,
+    labels: Vec<String>,
+    current: &[String],
+    hint: &'static str,
+) -> Field {
+    let selected = options.iter().map(|o| current.contains(o)).collect();
+    Field {
+        label,
+        value: String::new(),
+        hint,
+        options,
+        labels,
+        multi: true,
+        selected,
+        cursor: 0,
     }
 }
 
@@ -293,7 +345,18 @@ impl Form {
         )
     }
 
-    pub fn tlp(t: &TlpSettings) -> Self {
+    pub fn tlp(t: &TlpSettings, followers: &[FollowerInfo]) -> Self {
+        let accepted = followers.iter().filter(|f| f.state == "accepted");
+        let (actors, labels) = accepted
+            .map(|f| {
+                let label = f
+                    .handle
+                    .clone()
+                    .or_else(|| f.name.clone())
+                    .unwrap_or_else(|| f.actor.clone());
+                (f.actor.clone(), label)
+            })
+            .unzip();
         Self::new(
             " TLP settings ",
             FormKind::Tlp,
@@ -304,10 +367,12 @@ impl Form {
                     t.default_tlp.as_str(),
                     "TLP:RED is never shared",
                 ),
-                field(
+                multi(
                     "AMBER recipients",
-                    t.amber_recipients.join(", "),
-                    "comma-separated actor URLs",
+                    actors,
+                    labels,
+                    &t.amber_recipients,
+                    "←/→ move  Space toggle; accepted followers only",
                 ),
             ],
         )
@@ -491,13 +556,7 @@ impl Form {
                 }
                 Request::SetTlpSettings(TlpSettings {
                     default_tlp,
-                    amber_recipients: self
-                        .v(1)
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect(),
+                    amber_recipients: self.fields[1].checked(),
                 })
             }
             FormKind::Allowlist => {
@@ -561,6 +620,7 @@ impl Form {
         match key.code {
             KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % n,
             KeyCode::BackTab | KeyCode::Up => self.focus = (self.focus + n - 1) % n,
+            _ if self.fields[self.focus].multi => self.on_multi_key(key),
             _ if !self.fields[self.focus].options.is_empty() => self.on_select_key(key),
             KeyCode::Backspace => {
                 self.fields[self.focus].value.pop();
@@ -582,6 +642,22 @@ impl Form {
             _ => return,
         };
         fl.value = fl.options[i].clone();
+    }
+
+    fn on_multi_key(&mut self, key: KeyEvent) {
+        let fl = &mut self.fields[self.focus];
+        let n = fl.options.len();
+        if n == 0 {
+            return;
+        }
+        match key.code {
+            KeyCode::Right => fl.cursor = (fl.cursor + 1) % n,
+            KeyCode::Left => fl.cursor = (fl.cursor + n - 1) % n,
+            KeyCode::Home => fl.cursor = 0,
+            KeyCode::End => fl.cursor = n - 1,
+            KeyCode::Char(' ') => fl.selected[fl.cursor] = !fl.selected[fl.cursor],
+            _ => {}
+        }
     }
 
     pub fn draw(&self, f: &mut Frame) {
@@ -611,7 +687,38 @@ impl Form {
             } else {
                 Style::default()
             };
-            let input = if fl.options.is_empty() {
+            let input = if fl.multi {
+                let count = fl.selected.iter().filter(|s| **s).count();
+                if fl.options.is_empty() {
+                    Line::from(Span::styled(
+                        "(no accepted followers)",
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                } else if focused {
+                    let mark = if fl.selected[fl.cursor] {
+                        "[x] "
+                    } else {
+                        "[ ] "
+                    };
+                    Line::from(vec![
+                        Span::styled("◀ ", style),
+                        Span::raw(format!("{mark}{}", fl.shown(fl.cursor))),
+                        Span::styled(" ▶", style),
+                        Span::styled(
+                            format!("  {count} of {} selected", fl.options.len()),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ])
+                } else if count == 0 {
+                    Line::from(Span::styled("(none)", Style::default().fg(Color::DarkGray)))
+                } else {
+                    let names: Vec<&str> = (0..fl.options.len())
+                        .filter(|i| fl.selected[*i])
+                        .map(|i| fl.shown(i))
+                        .collect();
+                    Line::from(names.join(", "))
+                }
+            } else if fl.options.is_empty() {
                 let cursor = if focused { "▏" } else { "" };
                 Line::from(vec![
                     Span::raw(fl.value.clone()),
@@ -752,6 +859,44 @@ mod tests {
         assert!(f.to_request().is_err());
         f.fields[1].value = "admin".into();
         assert!(f.to_request().is_err());
+    }
+
+    #[test]
+    fn tlp_form_picks_accepted_followers() {
+        let follower = |actor: &str, handle: &str, state: &str| FollowerInfo {
+            actor: actor.into(),
+            handle: Some(handle.into()),
+            state: state.into(),
+            since: Utc::now(),
+            name: None,
+            summary: None,
+        };
+        let followers = [
+            follower("https://a.example/actor", "a@a.example", "accepted"),
+            follower("https://b.example/actor", "b@b.example", "accepted"),
+            follower("https://c.example/actor", "c@c.example", "pending"),
+        ];
+        let settings = TlpSettings {
+            default_tlp: Tlp::Green,
+            // The pending follower and an unknown actor are dropped.
+            amber_recipients: vec![
+                "https://b.example/actor".into(),
+                "https://c.example/actor".into(),
+                "https://gone.example/actor".into(),
+            ],
+        };
+        let mut f = Form::tlp(&settings, &followers);
+        assert_eq!(f.fields[1].labels, ["a@a.example", "b@b.example"]);
+        assert_eq!(f.fields[1].selected, [false, true]);
+
+        f.focus = 1;
+        f.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        f.on_key(KeyEvent::from(KeyCode::Right));
+        f.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        let Request::SetTlpSettings(s) = f.to_request().unwrap() else {
+            panic!()
+        };
+        assert_eq!(s.amber_recipients, ["https://a.example/actor"]);
     }
 
     #[test]
