@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, TimeDelta, Utc};
+use pubsec_core::display::{actor_handle, sanitize};
 use pubsec_core::normalize;
 use pubsec_core::protocol::{
     AllowlistEntry, AllowlistScope, ApiScope, ApiTokenInfo, NewAllowlistEntry,
@@ -487,18 +488,6 @@ pub struct TimelineActor {
     pub name: Option<String>,
 }
 
-/// Remote actor strings, made safe for display.
-fn display_string(s: Option<&str>) -> Option<String> {
-    let s: String = s?.chars().filter(|c| !c.is_control()).take(100).collect();
-    let s = s.trim();
-    (!s.is_empty()).then(|| s.to_string())
-}
-
-fn actor_handle(username: Option<&str>, id: &str) -> Option<String> {
-    let host = url::Url::parse(id).ok()?.host_str()?.to_string();
-    Some(format!("{}@{host}", display_string(username)?))
-}
-
 /// Observation periods of stored evidence overlapping `[since, until]`, one
 /// entry per evidence object and behaviour. Locally allowlisted observables
 /// are left out, like on the active list.
@@ -605,7 +594,7 @@ async fn timeline(
             state.urls.actor.clone(),
             TimelineActor {
                 handle: actor_handle(Some(&i.username), &state.urls.actor),
-                name: display_string(Some(&i.organization)),
+                name: sanitize(Some(&i.organization)),
             },
         );
     }
@@ -613,7 +602,7 @@ async fn timeline(
         let info = match &a {
             Some(a) => TimelineActor {
                 handle: actor_handle(a.preferred_username.as_deref(), &id),
-                name: display_string(a.name.as_deref()),
+                name: sanitize(a.name.as_deref()),
             },
             None => TimelineActor {
                 handle: None,

@@ -6,6 +6,7 @@
 //! effective-expiry engine (Section 7), and the control-socket protocol
 //! shared between `pubsecd` and `pubsec-tui`.
 
+pub mod display;
 pub mod expiry;
 pub mod model;
 pub mod normalize;

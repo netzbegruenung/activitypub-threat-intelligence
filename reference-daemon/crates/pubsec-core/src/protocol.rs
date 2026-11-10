@@ -157,6 +157,7 @@ pub struct StatusInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FollowingInfo {
     pub actor: String,
+    /// WebFinger handle `user@host`, if known.
     pub handle: Option<String>,
     /// `pending`, `accepted` or `rejected`.
     pub state: String,
@@ -176,6 +177,9 @@ pub struct FollowingInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FollowerInfo {
     pub actor: String,
+    /// WebFinger handle `user@host`, if known.
+    #[serde(default)]
+    pub handle: Option<String>,
     /// `pending` or `accepted`.
     pub state: String,
     pub since: DateTime<Utc>,

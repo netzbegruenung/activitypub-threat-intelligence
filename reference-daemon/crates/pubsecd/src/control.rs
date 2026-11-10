@@ -6,6 +6,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
 use anyhow::{anyhow, bail};
 use chrono::Utc;
+use pubsec_core::display;
 use pubsec_core::normalize;
 use pubsec_core::policy::PolicySet;
 use pubsec_core::protocol::*;
@@ -407,6 +408,12 @@ async fn list_following(state: &AppState) -> anyhow::Result<Vec<FollowingInfo>> 
                 .into_iter()
                 .map(|f| {
                     let remote = db::get_remote_actor(c, &f.actor)?;
+                    let handle = remote
+                        .as_ref()
+                        .and_then(|a| {
+                            display::actor_handle(a.preferred_username.as_deref(), &f.actor)
+                        })
+                        .or_else(|| f.handle.filter(|h| h.contains('@')));
                     let (name, summary) = remote.map(|a| (a.name, a.summary)).unwrap_or_default();
                     Ok(FollowingInfo {
                         name,
@@ -414,7 +421,7 @@ async fn list_following(state: &AppState) -> anyhow::Result<Vec<FollowingInfo>> 
                         operator: map.get(&f.actor).map(|(o, _)| o.clone()),
                         evidence: db::count_evidence_by_publisher(c, &f.actor, Tlp::Red)?,
                         actor: f.actor,
-                        handle: f.handle,
+                        handle,
                         state: f.state,
                         last_sync: f.last_sync,
                         last_full_sync: f.last_full_sync,
