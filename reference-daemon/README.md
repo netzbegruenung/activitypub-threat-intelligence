@@ -275,15 +275,21 @@ curl -H "Authorization: Bearer $TOKEN" https://ti-internal:8081/api/v1/nodes
 ```json
 [{"actor": "https://peer.example.org/actor", "handle": "feed@peer.example.org",
   "name": "Peer Org", "summary": "abuse@peer.example.org",
-  "operator": "https://peer.example.org/org", "evidence": 41, "state": "accepted"}]
+  "operator": "https://peer.example.org/org", "evidence": 41,
+  "state": "accepted", "followBack": "accepted"}]
 ```
 
-The actors this node follows, one entry each, with the display `handle` and
-`name` (cached actor document), the resolved `operator`, how much `evidence`
-that actor has published, and the follow `state` (`pending`, `accepted` or
-`rejected`). `evidence` counts only entries up to the token's `max_tlp`, like
-the active list and timeline. On a [hub](#hub-mode) these are the connected nodes, so this is
-the public node directory that `pubsec-statsd` republishes.
+The AP-TI nodes that follow this node, one entry each, with the display
+`handle` and `name` (cached actor document), the resolved `operator`, how much
+`evidence` that actor has published, the `state` of its follow (`pending`,
+`accepted` or `rejected`) and the `state` of our follow back (`followBack`,
+absent while we do not follow it). A node connects by following us, which is
+what makes its evidence flow in, so the directory follows from the follower
+list and a node is listed whether or not it accepts the follow back. Followers
+that expose no `activeObjects` collection are not AP-TI nodes and are left out,
+like in [hub mode](#hub-mode)'s automatic follow-back. `evidence` counts only
+entries up to the token's `max_tlp`, like the active list and timeline. On a
+hub this is the public node directory that `pubsec-statsd` republishes.
 
 ### Manage the allowlist
 
@@ -750,7 +756,7 @@ active list and timeline to counts, and publishes:
 | File / path | Content |
 |---|---|
 | `index.html`, `GET /` | A self-contained aggregate statistics page: connected-node count, evidence ingested, and active-observable and finding counts and distributions, by observable type and behaviour. **No individual IP, prefix or domain is shown** (personal data even at TLP:CLEAR, Sec. 11). |
-| `nodes.json`, `GET /api/v1/nodes` | The hub's connected nodes, as JSON (see [Connected nodes](#connected-nodes-scope-read)). Only nodes whose follow is `accepted` are published. |
+| `nodes.json`, `GET /api/v1/nodes` | The hub's connected nodes, as JSON (see [Connected nodes](#connected-nodes-scope-read)). Only nodes whose follow of the hub is `accepted` are published. |
 | `GET /health` | `{"status":"ok"}`. Server mode only. |
 
 | Subcommand | Effect |
@@ -984,7 +990,8 @@ cargo test --workspace
     observables in the details table matched the country's count.
 
 - **`pubsecd` hub mode** (`crates/pubsecd/tests/integration.rs`, `hub_mode`,
-  `hub_mode_manual_approval`): a node follows the hub and the hub follows it
+  `hub_mode_manual_approval`, `nodes_without_accepted_follow_back`): a node
+  follows the hub and the hub follows it
   back and trusts it; the hub ingests only TLP:CLEAR (a TLP:GREEN sighting is
   dropped); a single node does not reach the `k = 2` quorum and a second
   corroborating node activates the observable; the connected-node directory
@@ -992,7 +999,8 @@ cargo test --workspace
   distrusted when its node connects; when a node unfollows, the hub unfollows
   it, withdraws the auto-trust and the observable drops below the quorum; and
   with manual approval a pending follower is neither followed back nor
-  trusted until approved.
+  trusted until approved. A node that never accepts the hub's follow back is
+  still listed as connected.
 - **`crates/pubsec-statsd`:**
   - **Unit tests:** config validation, aggregate computation, the page
     (no raw observable is rendered, the CSP matches the inline style, the

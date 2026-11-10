@@ -113,9 +113,9 @@ impl Poller {
             self.client.timeline(since),
             self.client.nodes(),
         )?;
-        // The hub's follow list also holds follows that are still pending or
-        // were rejected; those nodes are not exchanging evidence, so they are
-        // neither counted nor published as connected.
+        // The hub's follower list also holds follows awaiting approval or
+        // already rejected; those nodes are not connected yet, so they are
+        // neither counted nor published.
         let nodes: Vec<_> = nodes
             .into_iter()
             .filter(|n| n.state == "accepted")

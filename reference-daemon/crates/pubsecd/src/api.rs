@@ -358,7 +358,7 @@ async fn active(
 
 // -------------------------------------------------------------------- nodes
 
-/// One connected node (an actor this node follows), for a hub's public
+/// One connected node (an AP-TI node that follows us), for a hub's public
 /// directory.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,12 +375,19 @@ pub struct NodeInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operator: Option<String>,
     pub evidence: u64,
-    /// `pending`, `accepted` or `rejected`.
+    /// State of the node's follow of us: `pending`, `accepted` or `rejected`.
     pub state: String,
+    /// State of our follow back, absent while we do not follow the node.
+    /// A node is connected regardless of whether it accepts the follow back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_back: Option<String>,
 }
 
-/// Connected nodes (the actors we follow). On a hub these are the nodes that
-/// have connected, so this is the public node directory. Evidence counts are
+/// Connected nodes (the AP-TI nodes that follow us). A node connects by
+/// following us, which is what makes its evidence flow in, so the directory
+/// is the follower list and not our own follow-back list. Followers that
+/// expose no `activeObjects` collection are not AP-TI nodes and are left
+/// out, like in hub mode's automatic follow-back. Evidence counts are
 /// capped at the token's `max_tlp`, like the active list and timeline.
 async fn nodes(State(state): State<Shared>, headers: HeaderMap) -> Response {
     let token = match authorise(&state, &headers, ApiScope::Read).await {
@@ -392,29 +399,30 @@ async fn nodes(State(state): State<Shared>, headers: HeaderMap) -> Response {
         .db
         .call(move |c| {
             let map = db::actor_operator_map(c)?;
-            db::list_following(c)?
+            let follow_back: BTreeMap<String, String> = db::list_following(c)?
                 .into_iter()
-                .map(|f| {
-                    let remote = db::get_remote_actor(c, &f.actor)?;
-                    let (name, summary) = remote
-                        .as_ref()
-                        .map(|a| (a.name.clone(), a.summary.clone()))
-                        .unwrap_or_default();
-                    let handle = remote
-                        .as_ref()
-                        .and_then(|a| actor_handle(a.preferred_username.as_deref(), &f.actor))
-                        .or_else(|| f.handle.clone().filter(|h| h.contains('@')));
-                    Ok(NodeInfo {
-                        actor: f.actor.clone(),
-                        handle,
-                        name,
-                        summary,
-                        operator: map.get(&f.actor).map(|(o, _)| o.clone()),
-                        evidence: db::count_evidence_by_publisher(c, &f.actor, max_tlp)?,
-                        state: f.state,
-                    })
-                })
-                .collect::<anyhow::Result<Vec<_>>>()
+                .map(|f| (f.actor, f.state))
+                .collect();
+            let mut nodes = Vec::new();
+            for f in db::list_followers(c)? {
+                let Some(remote) = db::get_remote_actor(c, &f.actor)? else {
+                    continue;
+                };
+                if remote.active_objects.is_none() {
+                    continue;
+                }
+                nodes.push(NodeInfo {
+                    handle: f.handle,
+                    name: f.name,
+                    summary: f.summary,
+                    operator: map.get(&f.actor).map(|(o, _)| o.clone()),
+                    evidence: db::count_evidence_by_publisher(c, &f.actor, max_tlp)?,
+                    follow_back: follow_back.get(&f.actor).cloned(),
+                    state: f.state,
+                    actor: f.actor,
+                });
+            }
+            Ok(nodes)
         })
         .await
     {

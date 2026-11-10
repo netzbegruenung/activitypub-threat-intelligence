@@ -159,7 +159,7 @@ impl PubsecdClient {
         resp.json().await.context("invalid timeline")
     }
 
-    /// The hub's connected nodes (its follow list).
+    /// The hub's connected nodes (the nodes that follow it).
     pub async fn nodes(&self) -> anyhow::Result<Vec<NodeInfo>> {
         let resp = self
             .http
