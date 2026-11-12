@@ -363,6 +363,58 @@ pubsec-fail2ban -c /etc/pubsec-fail2ban/config.toml run
 
 See [`crates/pubsec-fail2ban/pubsec-fail2ban.example.toml`](crates/pubsec-fail2ban/pubsec-fail2ban.example.toml).
 
+### Package configuration
+
+The Debian package depends on `fail2ban` and configures the integration
+interactively on install. It asks for
+
+1. the pubsecd API URL,
+2. the `push` and `read` API tokens,
+3. whether all active IPs from pubsecd should be banned locally, and
+4. which fail2ban jails to report.
+
+The jail list offers the jails that are already enabled on the host (read from
+`jail.conf` and `jail.d/`) plus the ones this package ships, and preselects the
+enabled ones. Each selected jail is written to `[push.jails.<jail>]` with a
+behaviour from a built-in table; unknown jails fall back to `other`.
+
+`/etc/pubsec-fail2ban/config.toml` is generated from the answers and managed
+with `ucf`, so hand edits survive upgrades. Re-run the questions with:
+
+```sh
+dpkg-reconfigure pubsec-fail2ban
+```
+
+The tokens are removed from the debconf database once written.
+
+### Shipped filters and jails
+
+Besides `filter.d/pubsec.conf` (used by `pull`), the package ships filters that
+match on the **access** logs, complementing the fail2ban filters that inspect
+the error logs:
+
+| Filter | Matches |
+|---|---|
+| `pubsec-*-scan` | Requests for files that must never be public (`.env`, `.git/`, `wp-config.php`, `phpinfo`). |
+| `pubsec-*-probing` | 404 floods from scanner path lists; static files are excluded. |
+| `pubsec-*-exploit` | Traversal, Log4Shell, PHP-CGI, SQLi/XSS, appliance exploits, webshell names. |
+| `pubsec-*-auth-flood` | Many 401s in a short time. |
+
+`pubsec-httpd-*` serves both Apache and nginx and assumes the **combined** log
+format; `pubsec-haproxy-*` expects HAProxy's `httplog` and reads the journal
+(`SYSLOG_IDENTIFIER=haproxy`). Verify a filter against your own logs before
+relying on it:
+
+```sh
+fail2ban-regex /var/log/apache2/access.log /etc/fail2ban/filter.d/pubsec-httpd-scan.conf
+```
+
+Each filter keeps its exclusions (Nextcloud sync traffic, the WordPress REST
+API) in a `_skip` variable at the top, so they can be overridden in a `.local`
+file. The matching jails live in `/usr/share/pubsec-fail2ban/jail.d/`; the
+postinst copies the selected ones into `/etc/fail2ban/jail.d/` and never
+overwrites an existing file.
+
 ### Push
 
 - **Jail mapping:** each jail is mapped to a behaviour, an optional port and
@@ -380,18 +432,21 @@ See [`crates/pubsec-fail2ban/pubsec-fail2ban.example.toml`](crates/pubsec-fail2b
 - **Log target:** fail2ban must log to a file (`logtarget = /var/log/fail2ban.log`),
   not to syslog or the journal.
 
-> **Feedback loop:** put the jails fed by `pull` (e.g. `pubsecd-ssh`) into
+> **Feedback loop:** put the jails fed by `pull` (e.g. `pubsecd-ban`) into
 > `push.ignore_jails`. Otherwise bans imported from peers would be published
 > again as your own Sightings.
 
 ### Pull
 
-1. Install the filter and the example jail:
+1. Install the filter and the jail:
 
    ```sh
    cp crates/pubsec-fail2ban/fail2ban/filter.d/pubsec.conf /etc/fail2ban/filter.d/
-   cp crates/pubsec-fail2ban/fail2ban/jail.d/pubsecd-ssh.conf.example /etc/fail2ban/jail.d/pubsecd-ssh.conf
+   cp crates/pubsec-fail2ban/fail2ban/jail.d/pubsecd-ban.local /etc/fail2ban/jail.d/
    ```
+
+   The Debian package does this for you; see [Package
+   configuration](#package-configuration).
 
 2. Each `[[pull.output]]` selects entries by behaviour, IP type and
    (optionally) port, and appends lines such as:

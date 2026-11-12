@@ -198,7 +198,7 @@ mod tests {
         let cfg = Config::parse(include_str!("../pubsec-fail2ban.example.toml")).unwrap();
         let push = cfg.push.unwrap();
         assert_eq!(push.jails["sshd"].behavior, "ssh-bruteforce");
-        assert!(push.ignore_jails.contains(&"pubsecd-ssh".to_string()));
+        assert!(push.ignore_jails.contains(&"pubsecd-ban".to_string()));
         assert_eq!(cfg.pull.unwrap().outputs.len(), 1);
     }
 

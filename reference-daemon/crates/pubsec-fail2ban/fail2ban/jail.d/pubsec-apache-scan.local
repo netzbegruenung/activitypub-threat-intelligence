@@ -1,0 +1,9 @@
+# Requests for files that must never be publicly reachable (.env, .git, credentials).
+[pubsec-apache-scan]
+enabled  = true
+filter   = pubsec-httpd-scan
+port     = http,https
+logpath  = %(apache_access_log)s
+maxretry = 5
+findtime = 600
+bantime  = 1d

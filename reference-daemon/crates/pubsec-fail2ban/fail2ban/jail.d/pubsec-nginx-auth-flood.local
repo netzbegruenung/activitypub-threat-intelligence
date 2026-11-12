@@ -1,0 +1,9 @@
+# Many 401s in a short time against sites with HTTP authentication.
+[pubsec-nginx-auth-flood]
+enabled  = true
+filter   = pubsec-httpd-auth-flood
+port     = http,https
+logpath  = %(nginx_access_log)s
+maxretry = 20
+findtime = 300
+bantime  = 1h

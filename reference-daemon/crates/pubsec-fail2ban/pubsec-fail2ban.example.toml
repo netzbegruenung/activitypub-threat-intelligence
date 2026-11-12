@@ -21,7 +21,7 @@ batch_interval_secs = 30
 poll_interval_ms = 1000
 # IMPORTANT: never report the jails fed by `pull`, otherwise bans imported
 # from peers are re-published as your own Sightings (feedback loop).
-ignore_jails = ["pubsecd-ssh"]
+ignore_jails = ["pubsecd-ban"]
 # "Restore Ban" lines are re-applied bans after a fail2ban restart.
 report_restored = false
 # Behaviour for jails not listed below; leave unset to skip them.

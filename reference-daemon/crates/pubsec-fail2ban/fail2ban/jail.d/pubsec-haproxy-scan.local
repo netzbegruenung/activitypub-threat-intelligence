@@ -1,0 +1,9 @@
+# Requests for files that must never be publicly reachable (.env, .git, credentials).
+[pubsec-haproxy-scan]
+enabled  = true
+filter   = pubsec-haproxy-scan
+port     = http,https
+backend  = systemd
+maxretry = 5
+findtime = 600
+bantime  = 1d

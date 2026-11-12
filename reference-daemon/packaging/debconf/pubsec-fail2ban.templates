@@ -1,0 +1,57 @@
+Template: pubsec-fail2ban/api-url
+Type: string
+Default: http://127.0.0.1:8081
+Description: URL of the pubsecd REST API:
+ pubsec-fail2ban reports fail2ban bans to a pubsecd instance and reads the
+ active list back from it. Enter the address of the internal REST API, which
+ is the [api] bind address in the pubsecd configuration.
+
+Template: pubsec-fail2ban/push-token
+Type: password
+Description: pubsecd API token with the "push" scope:
+ This token is used to report bans observed by fail2ban. Create it in
+ pubsec-tui on the Tokens tab; the secret is shown only once.
+ .
+ Leave empty to configure the token by hand later. Until both tokens are set,
+ the service is enabled but will not start successfully.
+
+Template: pubsec-fail2ban/read-token
+Type: password
+Description: pubsecd API token with the "read" scope:
+ This token is used to fetch the active list that is banned locally. Its
+ max_tlp setting limits which entries are handed out.
+ .
+ Leave empty to configure the token by hand later.
+
+Template: pubsec-fail2ban/ban-active
+Type: boolean
+Default: true
+Description: Ban all active IPs from the pubsecd active list?
+ pubsec-fail2ban can write the addresses of the pubsecd active list into a log
+ file that a dedicated fail2ban jail follows, so that threats reported by your
+ peers are blocked locally before they reach this host.
+ .
+ Declining leaves the local jails reporting to pubsecd without importing any
+ bans from it.
+
+Template: pubsec-fail2ban/integrations
+Type: multiselect
+Choices: ${choices}
+Description: fail2ban jails to report to pubsecd:
+ Bans from the selected jails are published as observations. Jails that are
+ already enabled on this system are preselected.
+ .
+ Entries starting with "pubsec-" are jails shipped by this package for Apache,
+ nginx and HAProxy access logs; selecting one installs its jail configuration
+ into /etc/fail2ban/jail.d. They complement the filters of the fail2ban
+ package, which inspect the error logs instead.
+ .
+ The Apache and nginx jails expect the "combined" log format. Verify them with
+ fail2ban-regex before relying on them.
+
+Template: pubsec-fail2ban/haproxy-note
+Type: note
+Description: HAProxy jails read the systemd journal
+ The selected HAProxy jails use the systemd journal as their backend and match
+ on SYSLOG_IDENTIFIER=haproxy. If HAProxy on this host logs to a file instead,
+ set a logpath in the corresponding file under /etc/fail2ban/jail.d.
