@@ -7,10 +7,22 @@ pubsec_toml_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+# Reads KEY from the installed configuration. Falls back to the .dpkg-bak copy
+# that dpkg-maintscript-helper rm_conffile leaves when upgrading from a version
+# that shipped the configuration as a conffile: the file itself is gone by the
+# time this runs.
 pubsec_toml_read() {
-    [ -f "$PUBSEC_CONFIG" ] || return 0
-    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\(.*\)\"[[:space:]]*\$/\1/p" \
-        "$PUBSEC_CONFIG" | head -n 1 | sed -e 's/\\"/"/g' -e 's/\\\\/\\/g'
+    for f in "$PUBSEC_CONFIG" "$PUBSEC_CONFIG.dpkg-bak"; do
+        [ -f "$f" ] || continue
+        v=$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\(.*\)\"[[:space:]]*\$/\1/p" \
+            "$f" | head -n 1 | sed -e 's/\\"/"/g' -e 's/\\\\/\\/g')
+        # Placeholders of the former example configuration are not credentials.
+        case "$v" in
+            "" | *change-me*) continue ;;
+        esac
+        printf '%s' "$v"
+        return 0
+    done
 }
 
 db_get pubsec-fail2ban/api-url

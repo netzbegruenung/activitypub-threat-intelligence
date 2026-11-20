@@ -1,0 +1,90 @@
+Template: pubsec-rspamd/api-url
+Type: string
+Default: http://127.0.0.1:8081
+Description: URL of the pubsecd REST API:
+ pubsec-rspamd reports spam senders seen by Rspamd to a pubsecd instance and
+ reads the active list back from it. Enter the address of the internal REST
+ API, which is the [api] bind address in the pubsecd configuration.
+
+Template: pubsec-rspamd/push-token
+Type: password
+Description: pubsecd API token with the "push" scope:
+ This token is used to report spam senders. Create it in pubsec-tui on the
+ Tokens tab; the secret is shown only once.
+ .
+ Leave empty to configure the token by hand later. Until the tokens are set,
+ the service is not started and Rspamd is not set up to use it.
+
+Template: pubsec-rspamd/read-token
+Type: password
+Description: pubsecd API token with the "read" scope:
+ This token is used to fetch the active list that Rspamd scores messages
+ with. Its max_tlp setting limits which entries are handed out.
+ .
+ Leave empty to configure the token by hand later.
+
+Template: pubsec-rspamd/report
+Type: boolean
+Default: true
+Description: Report senders of spam to pubsecd?
+ A plugin in Rspamd sends the result of each scanned message to
+ pubsec-rspamd. IPs that keep sending messages with a high spam score are
+ published to pubsecd as observations (TLP:GREEN).
+ .
+ Authenticated users are never reported. Scores added by the pubsecd active
+ list itself are not counted.
+
+Template: pubsec-rspamd/report-domains
+Type: boolean
+Default: true
+Description: Also report envelope-from domains of spam?
+ The domain of the SMTP envelope sender of spam messages is reported as well
+ (TLP:GREEN), but only if SPF authorised the sending IP for it. Freemail and
+ disposable providers and the bounce domains of common mail service providers
+ are skipped.
+
+Template: pubsec-rspamd/ignore-networks
+Type: string
+Default:
+Description: Networks that must never be reported:
+ IP addresses or prefixes of your own relays, backup MX and forwarders,
+ separated by spaces or commas, e.g. "192.0.2.10, 2001:db8::/48".
+ .
+ Entries of the pubsecd allowlist are honoured as well.
+
+Template: pubsec-rspamd/own-domains
+Type: string
+Default:
+Description: Own domains that must never be reported:
+ Domains whose envelope-from must never be reported, e.g. the domains you send
+ mail for, separated by spaces or commas. Subdomains are covered as well.
+
+Template: pubsec-rspamd/use-maps
+Type: boolean
+Default: true
+Description: Score messages with the pubsecd active list?
+ pubsec-rspamd can serve the pubsecd active list to Rspamd's multimap module,
+ so that sending IPs, URL hosts and sender domains reported by your peers add
+ to the spam score (symbols PUBSEC_BAD_*). The rules are installed as
+ /etc/rspamd/local.d/pubsec_multimap.inc.
+
+Template: pubsec-rspamd/multimap-note
+Type: note
+Description: Include the pubsec multimap rules in multimap.conf
+ /etc/rspamd/local.d/multimap.conf already exists, so it was not changed.
+ Add this line to it to activate the pubsec rules:
+ .
+  .include(try=true) "$LOCAL_CONFDIR/local.d/pubsec_multimap.inc"
+ .
+ Then reload Rspamd.
+
+Template: pubsec-rspamd/multimap-remove-note
+Type: note
+Description: Remove the pubsec multimap rules from multimap.conf
+ /etc/rspamd/local.d/multimap.conf includes the pubsec multimap rules, but
+ the active list is no longer served, so Rspamd cannot load the maps. Remove
+ this line from it:
+ .
+  .include(try=true) "$LOCAL_CONFDIR/local.d/pubsec_multimap.inc"
+ .
+ Then reload Rspamd.

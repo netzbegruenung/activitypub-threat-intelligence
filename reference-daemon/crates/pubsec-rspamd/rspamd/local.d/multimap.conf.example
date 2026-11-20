@@ -1,5 +1,9 @@
 # Multimap rules for the maps served by pubsec-rspamd ([[maps.map]]).
-# Add to $LOCAL_CONFDIR/local.d/multimap.conf.
+# Add to $LOCAL_CONFDIR/local.d/multimap.conf. The Debian package installs
+# them as $LOCAL_CONFDIR/local.d/pubsec_multimap.inc instead, which takes
+# effect once local.d/multimap.conf contains:
+#
+#   .include(try=true) "$LOCAL_CONFDIR/local.d/pubsec_multimap.inc"
 #
 # IMPORTANT: every symbol defined here must be covered by
 # ingest.ignore_symbols (default "PUBSEC_*"), otherwise IPs imported from peers

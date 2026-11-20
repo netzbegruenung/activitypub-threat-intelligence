@@ -362,7 +362,7 @@ mod tests {
         assert!(ingest.ignore_symbols.contains(&"PUBSEC_*".to_string()));
         assert_eq!(ingest.tlp, Some(Tlp::Green));
         let ef = ingest.envelope_from.unwrap();
-        assert_eq!(ef.tlp, Some(Tlp::Clear));
+        assert_eq!(ef.tlp, Some(Tlp::Green));
         assert_eq!(ef.require_symbols, ["R_SPF_ALLOW"]);
         let maps = cfg.maps.unwrap();
         assert_eq!(maps.maps.len(), 3);
