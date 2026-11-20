@@ -253,6 +253,93 @@ async fn local_pipeline() {
     assert_eq!(l.evidence.len(), 1);
     assert_eq!(l.assessments.len(), 1);
     assert!(l.assessments[0].active);
+    assert_eq!(l.observations.len(), 1);
+    let o = &l.observations[0];
+    assert_eq!(o.token, "push");
+    assert!(!o.token_deleted);
+    assert_eq!(o.agent, None);
+    assert_eq!(o.count, 12);
+    assert!(!o.pending);
+    assert_eq!(o.sighting_id.as_deref(), Some(l.evidence[0].id.as_str()));
+
+    // A second sensor with its own token reports the same observable; the
+    // lookup names both, with the User-Agent of the one that sent it.
+    const MAIL: &str = "mail-token-0123456789";
+    add_token(&d, "mail", MAIL, &[ApiScope::Push], Tlp::Green).await;
+    let (s, _) = push(
+        &d,
+        MAIL,
+        json!({"value": "45.13.7.9", "behavior": "ssh-bruteforce", "count": 2}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let lookup_obs = || async {
+        let Reply::Lookup(l) = ctl(
+            &d,
+            Request::Lookup {
+                value: "45.13.7.9".into(),
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        l.observations
+    };
+    let obs = lookup_obs().await;
+    assert_eq!(obs.len(), 2, "{obs:?}");
+    let mail = obs.iter().find(|o| o.token == "mail").unwrap();
+    assert_eq!(mail.agent, None);
+    assert_eq!(mail.count, 2);
+    assert!(mail.pending);
+    assert_eq!(mail.sighting_id, None);
+    // The first sensor's observations stay published in the earlier Sighting.
+    let first = obs.iter().find(|o| o.token == "push").unwrap();
+    assert!(!first.pending);
+    assert_eq!(
+        first.sighting_id.as_deref(),
+        Some(l.evidence[0].id.as_str())
+    );
+    let r = reqwest::Client::new()
+        .post(format!("http://{}/api/v1/observations", d.api_addr))
+        .bearer_auth(MAIL)
+        .header("User-Agent", "pubsec-rspamd/2026.11.8")
+        .json(&json!({"value": "45.13.7.9", "behavior": "ssh-bruteforce"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    // A later push without a User-Agent keeps the last known one.
+    let (s, _) = push(
+        &d,
+        MAIL,
+        json!({"value": "45.13.7.9", "behavior": "ssh-bruteforce"}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let obs = lookup_obs().await;
+    let mail = obs.iter().find(|o| o.token == "mail").unwrap();
+    assert_eq!(mail.agent.as_deref(), Some("pubsec-rspamd/2026.11.8"));
+    assert_eq!(mail.count, 4);
+    let push_obs = obs.iter().find(|o| o.token == "push").unwrap();
+    assert_eq!(push_obs.count, 12);
+
+    // Deleting a token keeps its history.
+    d.state
+        .db
+        .call(|c| {
+            let t = db::list_api_tokens(c)?
+                .into_iter()
+                .find(|t| t.name == "mail")
+                .unwrap();
+            db::delete_api_token(c, t.id)
+        })
+        .await
+        .unwrap();
+    let obs = lookup_obs().await;
+    let mail = obs.iter().find(|o| o.token == "mail").unwrap();
+    assert!(mail.token_deleted);
+    assert_eq!(mail.agent.as_deref(), Some("pubsec-rspamd/2026.11.8"));
 
     // Behaviour policy: k = off disables Sighting activation.
     ctl_ok(

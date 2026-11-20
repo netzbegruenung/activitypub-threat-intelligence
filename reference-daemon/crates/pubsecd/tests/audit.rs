@@ -154,6 +154,7 @@ async fn audit_log() {
     let r = http
         .post(format!("http://{}/api/v1/observations", d.api_addr))
         .bearer_auth(PUSH)
+        .header("User-Agent", "pubsec-fail2ban/2026.11.8")
         .json(&json!({"value": "45.13.7.9", "behavior": "scan", "count": 3}))
         .send()
         .await
@@ -162,6 +163,7 @@ async fn audit_log() {
     buf.expect(&[
         "observation received",
         r#"by="api:sensor""#,
+        r#"agent="pubsec-fail2ban/2026.11.8""#,
         r#"obs_type="ipv4-addr""#,
         r#"value="45.13.7.9""#,
         r#"behavior="scan""#,

@@ -363,6 +363,25 @@ pub struct EvidenceSummary {
     pub withdrawn: bool,
 }
 
+/// Observations pushed by one API token for one behaviour.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObservationSummary {
+    pub behavior: Behavior,
+    /// Name of the reporting token.
+    pub token: String,
+    /// The token has been deleted since.
+    pub token_deleted: bool,
+    /// Last User-Agent the token pushed with, e.g. `pubsec-rspamd/2026.11.8`.
+    pub agent: Option<String>,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub count: u64,
+    /// The token's latest observations are not yet published in a Sighting.
+    pub pending: bool,
+    /// The local Sighting the token's observations were last published in.
+    pub sighting_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LookupResult {
     pub observable_type: ObservableType,
@@ -370,6 +389,9 @@ pub struct LookupResult {
     pub assessments: Vec<Assessment>,
     pub evidence: Vec<EvidenceSummary>,
     pub local_allowlist: Vec<AllowlistEntry>,
+    /// Only for values reported by own sensors through the REST API.
+    #[serde(default)]
+    pub observations: Vec<ObservationSummary>,
 }
 
 #[cfg(test)]
