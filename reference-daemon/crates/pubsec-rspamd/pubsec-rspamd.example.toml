@@ -20,7 +20,7 @@ bind = "127.0.0.1:11380"
 # Turn Rspamd scan results into observations of the sending IP and,
 # optionally, the envelope-from domain.
 [ingest]
-# Must match `secret` in the Rspamd module config (modules.local.d/pubsec.conf).
+# Must match `secret` of the Rspamd plugin (local.d/pubsec.conf).
 report_secret = "change-me-to-a-long-random-string"
 # A message is bad if its score minus the score of ignore_symbols reaches
 # this. The plugin's min_score must not be higher.
@@ -57,7 +57,7 @@ max_queue = 10000
 [ingest.envelope_from]
 behavior = "smtp-spam"
 # TLP of the reported domains, independent of ingest.tlp.
-tlp = "clear"
+tlp = "green"
 # Report a domain after this many bad messages within window_secs, sent
 # from at least min_senders distinct IPs (IPv6: ipv6_prefix) ...
 min_messages = 3

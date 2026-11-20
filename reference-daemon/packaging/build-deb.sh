@@ -66,19 +66,17 @@ add_conf() {
     echo "$2" >>"$d/DEBIAN/conffiles"
 }
 
-add_example() {
-    install -D -m 0644 "$1" "$d/usr/share/doc/$pkg/examples/$(basename "$1")"
-}
-
 add_share() {
     install -D -m 0644 "$1" "$d/usr/share/$pkg/$2"
 }
 
-# add_debconf  (expects packaging/debconf/$pkg.{templates,config.sh,postinst.sh}
-# and the shared jail map, which is prepended to both scripts so the jail table
-# cannot drift between asking the question and writing the answer)
+# add_debconf SHARED  (expects packaging/debconf/$pkg.{templates,config.sh,
+# postinst.sh,SHARED.sh}; SHARED.sh is prepended to every script, so tables
+# like the jail map cannot drift between asking a question and writing the
+# answer)
 add_debconf() {
     dc=$root/packaging/debconf
+    shared=$dc/$pkg.$1.sh
     install -m 0644 "$dc/$pkg.templates" "$d/DEBIAN/templates"
     {
         echo '#!/bin/sh'
@@ -86,23 +84,23 @@ add_debconf() {
         echo
         echo '. /usr/share/debconf/confmodule'
         echo
-        cat "$dc/$pkg.jailmap.sh"
+        cat "$shared"
         echo
         cat "$dc/$pkg.config.sh"
     } >"$d/DEBIAN/config"
     chmod 0755 "$d/DEBIAN/config"
     postinst_configure=$work/$pkg.postinst-configure
     {
-        cat "$dc/$pkg.jailmap.sh"
+        cat "$shared"
         echo
         cat "$dc/$pkg.postinst.sh"
     } >"$postinst_configure"
     if [ -f "$dc/$pkg.postrm-purge.sh" ]; then
         postrm_purge=$work/$pkg.postrm-purge
-        # The package's own files are already gone at purge time, so the list of
-        # shipped jails has to be baked into the script.
+        # The package's own files are already gone at purge time, so the
+        # shared definitions have to be baked into the script.
         {
-            cat "$dc/$pkg.jailmap.sh"
+            cat "$shared"
             echo
             cat "$dc/$pkg.postrm-purge.sh"
         } >"$postrm_purge"
@@ -198,11 +196,16 @@ if [ "\$1" = configure ] && [ -x /usr/bin/deb-systemd-helper ]; then
         if [ -n "\$2" ]; then
             deb-systemd-invoke try-restart$units >/dev/null || true
         fi
+        # Set by a debconf postinst once the generated configuration is
+        # usable. deb-systemd-invoke does not start disabled units.
+        if [ -n "\${pubsec_start_units:-}" ]; then
+            deb-systemd-invoke start$enable_units >/dev/null || true
+        fi
     fi
 fi
 
-# The shipped configuration contains placeholders, so the service is enabled
-# but not started on a fresh install.
+# Otherwise the shipped configuration contains placeholders, so the service is
+# enabled but not started on a fresh install.
 exit 0
 EOF
 
@@ -303,7 +306,7 @@ done
 add_share "$root/crates/pubsec-fail2ban/pubsec-fail2ban.example.toml" \
     config.toml.example
 add_unit pubsec-fail2ban.service enable
-add_debconf
+add_debconf jailmap
 # Up to 2026.11.7 the configuration was a dpkg conffile; it is generated from
 # the debconf answers and managed with ucf now.
 rm_conffile /etc/pubsec-fail2ban/config.toml 2026.11.7
@@ -324,18 +327,31 @@ pack
 # ------------------------------------------------------------ pubsec-rspamd
 begin_pkg pubsec-rspamd
 add_bin pubsec-rspamd
-add_conf "$root/crates/pubsec-rspamd/pubsec-rspamd.example.toml" \
-    /etc/pubsec-rspamd/config.toml
-add_conf "$root/crates/pubsec-rspamd/rspamd/lua.local.d/pubsec.lua" \
-    /etc/rspamd/lua.local.d/pubsec.lua
-add_conf "$root/crates/pubsec-rspamd/rspamd/modules.local.d/pubsec.conf" \
+rspamd=$root/crates/pubsec-rspamd/rspamd
+add_conf "$rspamd/lua.local.d/pubsec.lua" /etc/rspamd/lua.local.d/pubsec.lua
+# Contains no secret: the postinst generates local.d/pubsec_secret.inc with it.
+add_conf "$rspamd/modules.local.d/pubsec.conf" \
     /etc/rspamd/modules.local.d/pubsec.conf
-add_example "$root/crates/pubsec-rspamd/rspamd/local.d/multimap.conf.example"
+# Inactive until included from local.d/multimap.conf, which the postinst
+# creates only if it does not exist yet.
+add_conf "$rspamd/local.d/multimap.conf.example" \
+    /etc/rspamd/local.d/pubsec_multimap.inc
+add_share "$root/crates/pubsec-rspamd/pubsec-rspamd.example.toml" \
+    config.toml.example
 add_unit pubsec-rspamd.service enable
-PKG_RECOMMENDS="rspamd"
+add_debconf common
+# Up to 2026.11.9 the configuration was a dpkg conffile; it is generated from
+# the debconf answers and managed with ucf now.
+rm_conffile /etc/pubsec-rspamd/config.toml 2026.11.9
+PKG_DEPENDS="rspamd, ucf, debconf (>= 0.5) | debconf-2.0"
+PKG_PREDEPENDS="dpkg (>= 1.17.14)"
 PKG_DESC="Rspamd connector for pubsecd"
 PKG_LONG="Turns Rspamd scan results into observations for pubsecd and serves the
-active list back to Rspamd as multimaps."
+active list back to Rspamd as multimaps.
+
+The package installs the Rspamd reporter plugin and the multimap rules, and
+asks at install time what to report and whether to score messages with the
+active list."
 write_control
 write_maintscripts pubsec-rspamd /var/lib/pubsec-rspamd
 pack

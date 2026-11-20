@@ -36,7 +36,9 @@ Every release ships amd64 `.deb` packages for `pubsecd` (which also contains
 `pubsec-tui`), `pubsec-fail2ban`, `pubsec-rspamd`, `pubsec-statsd`, `pubsec-allowlist`
 and `pubsec-dashboard`. Each one installs the binary, a systemd unit and the
 default configuration as a conffile under `/etc/<name>/config.toml`, plus the
-fail2ban filter and the Rspamd drop-ins where applicable. The units are
+fail2ban filter and the Rspamd drop-ins where applicable. `pubsec-fail2ban`
+and `pubsec-rspamd` instead generate their configuration from questions asked
+at install time (see their sections below). The units are
 enabled but not started, because the shipped configuration still contains
 placeholders:
 
@@ -569,17 +571,73 @@ See [`crates/pubsec-rspamd/pubsec-rspamd.example.toml`](crates/pubsec-rspamd/pub
 Keep the endpoint on loopback: the maps contain TLP-restricted data, limited
 by the read token's `max_tlp`.
 
+### Package configuration
+
+The Debian package depends on `rspamd` and configures the integration
+interactively on install. It asks for
+
+1. the pubsecd API URL,
+2. the `push` and `read` API tokens,
+3. whether to report spam senders (`[ingest]`) and, if so, own relays and
+   backup MX that must never be reported (`ignore_networks`),
+4. whether to report envelope-from domains too (`[ingest.envelope_from]`)
+   and own domains to exclude (added to `ignore_domains`), and
+5. whether to score messages with the active list (`[maps]`).
+
+Reported IPs and domains use TLP:GREEN. `/etc/pubsec-rspamd/config.toml` is
+generated from the answers and managed with `ucf`, so hand edits survive
+upgrades. Re-run the questions with:
+
+```sh
+dpkg-reconfigure pubsec-rspamd
+```
+
+The questions default to the settings in the installed configuration. When
+upgrading from 2026.11.9 or older, which shipped `config.toml` as a conffile,
+a modified configuration is kept: `ucf` shows the differences to the
+generated one and keeps the installed file unless told otherwise.
+
+The tokens are removed from the debconf database once written. The package
+installs these files for Rspamd:
+
+| File | |
+|---|---|
+| `/etc/rspamd/lua.local.d/pubsec.lua` | the reporter plugin (conffile) |
+| `/etc/rspamd/modules.local.d/pubsec.conf` | plugin settings without the secret (conffile) |
+| `/etc/rspamd/local.d/pubsec_secret.inc` | the report secret, copied from `ingest.report_secret` (generated randomly on install) whenever the package is configured; do not edit |
+| `/etc/rspamd/local.d/pubsec_multimap.inc` | the `PUBSEC_BAD_*` multimap rules (conffile) |
+
+`/etc/rspamd/local.d/pubsec.conf` stays yours for overriding the plugin
+settings. Do not set `secret` there.
+
+Rspamd is only set up to report and to use the maps while
+`pubsec-rspamd check` accepts the configuration; the service is started at the
+same time. After editing `config.toml` by hand, run `dpkg-reconfigure
+pubsec-rspamd` so the Rspamd side follows.
+
+The multimap rules take effect once `/etc/rspamd/local.d/multimap.conf`
+includes them. If that file does not exist, the package creates it with the
+include, and removes it again when `[maps]` is turned off. An existing one is
+never changed; a debconf note shows the line to add or to remove:
+
+```
+.include(try=true) "$LOCAL_CONFDIR/local.d/pubsec_multimap.inc"
+```
+
 ### Ingest
 
 1. Install the plugin and its settings (Debian paths; `CONFDIR` and
-   `LOCAL_CONFDIR` are both `/etc/rspamd`):
+   `LOCAL_CONFDIR` are both `/etc/rspamd`). The Debian package does this
+   for you:
 
    ```sh
    cp crates/pubsec-rspamd/rspamd/lua.local.d/pubsec.lua /etc/rspamd/lua.local.d/
    cp crates/pubsec-rspamd/rspamd/modules.local.d/pubsec.conf /etc/rspamd/modules.local.d/
+   echo 'secret = "<ingest.report_secret>";' >>/etc/rspamd/local.d/pubsec.conf
    ```
 
-   Set `secret` in `pubsec.conf` to `ingest.report_secret`. The plugin
+   The `secret` in `local.d/pubsec.conf` must match `ingest.report_secret`
+   (the Debian package writes it to `local.d/pubsec_secret.inc`). The plugin
    registers the idempotent symbol `PUBSEC_REPORT`, which runs after scoring.
    For each message with a score of at least its `min_score` it sends the
    sending IP, the envelope-from domain, the score, the action, the names
