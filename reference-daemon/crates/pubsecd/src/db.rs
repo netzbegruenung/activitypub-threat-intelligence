@@ -13,7 +13,8 @@ use pubsec_core::display;
 use pubsec_core::expiry::Assessment;
 use pubsec_core::policy::{BehaviorOverride, OperatorPolicy, Threshold};
 use pubsec_core::protocol::{
-    AllowlistEntry, AllowlistScope, ApiScope, ApiTokenInfo, FollowerInfo, ReviewItem,
+    AllowlistEntry, AllowlistScope, ApiScope, ApiTokenInfo, FollowerInfo, ObservationSummary,
+    ReviewItem,
 };
 use pubsec_core::{Behavior, EvidenceObject, ObservableType, Tlp};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -223,6 +224,26 @@ ALTER TABLE remote_actors ADD COLUMN summary TEXT;
 -- Anything set by an administrator has auto = 0 and is never touched.
 ALTER TABLE following ADD COLUMN auto INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE operator_policy ADD COLUMN auto INTEGER NOT NULL DEFAULT 0;
+"#,
+    r#"
+-- Which API tokens pushed an observation. No foreign key: the history
+-- survives deleting the token. Keyed by name, as token ids are reused.
+-- pending and sighting_id track what this token reported, not the merged
+-- observation.
+CREATE TABLE observation_sources (
+    observable_type TEXT NOT NULL,
+    observable_value TEXT NOT NULL,
+    behavior TEXT NOT NULL,
+    token_id INTEGER NOT NULL,
+    token_name TEXT NOT NULL,
+    agent TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    pending INTEGER NOT NULL DEFAULT 1,
+    sighting_id TEXT,
+    PRIMARY KEY (observable_type, observable_value, behavior, token_name)
+);
 "#,
 ];
 
@@ -1042,6 +1063,17 @@ pub fn purge_expired(
         "DELETE FROM observations WHERE pending = 0 AND last_seen < ?1",
         [ts(retention_cutoff)],
     )?;
+    // Sources go with their observation, and stale ones of a token that
+    // stopped reporting go once the observation is no longer pending.
+    c.execute(
+        "DELETE FROM observation_sources WHERE NOT EXISTS (
+             SELECT 1 FROM observations o
+             WHERE o.observable_type = observation_sources.observable_type
+               AND o.observable_value = observation_sources.observable_value
+               AND o.behavior = observation_sources.behavior
+               AND (o.pending = 1 OR observation_sources.last_seen >= ?1))",
+        [ts(retention_cutoff)],
+    )?;
     c.execute(
         "DELETE FROM review WHERE resolved IS NOT NULL AND resolved < ?1",
         [ts(retention_cutoff)],
@@ -1173,7 +1205,91 @@ pub fn mark_observation_published(
             o.count as i64
         ],
     )?;
+    // Sources only count as published once the whole observation is; a
+    // push merged in meanwhile keeps them pending for the next batch.
+    c.execute(
+        "UPDATE observation_sources SET pending = 0, sighting_id = ?4
+         WHERE observable_type = ?1 AND observable_value = ?2 AND behavior = ?3
+           AND pending = 1
+           AND EXISTS (SELECT 1 FROM observations o
+               WHERE o.observable_type = ?1 AND o.observable_value = ?2
+                 AND o.behavior = ?3 AND o.pending = 0)",
+        params![
+            o.observable_type.as_str(),
+            o.observable_value,
+            o.behavior.as_str(),
+            sighting_id
+        ],
+    )?;
     Ok(())
+}
+
+/// Record that the API token `token` pushed `o`, with the client's
+/// User-Agent if it sent one.
+pub fn add_observation_source(
+    c: &Connection,
+    o: &Observation,
+    token: &ApiTokenInfo,
+    agent: Option<&str>,
+) -> anyhow::Result<()> {
+    c.execute(
+        "INSERT INTO observation_sources (observable_type, observable_value, behavior,
+             token_id, token_name, agent, first_seen, last_seen, count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(observable_type, observable_value, behavior, token_name) DO UPDATE SET
+             token_id = excluded.token_id,
+             agent = COALESCE(excluded.agent, agent),
+             first_seen = MIN(first_seen, excluded.first_seen),
+             last_seen = MAX(last_seen, excluded.last_seen),
+             count = count + excluded.count,
+             pending = 1",
+        params![
+            o.observable_type.as_str(),
+            o.observable_value,
+            o.behavior.as_str(),
+            token.id,
+            token.name,
+            agent,
+            ts(o.first_seen),
+            ts(o.last_seen),
+            o.count as i64
+        ],
+    )?;
+    Ok(())
+}
+
+/// Local observations of one observable, one row per behaviour and
+/// reporting token.
+pub fn observations_for_observable(
+    c: &Connection,
+    ty: ObservableType,
+    value: &str,
+) -> anyhow::Result<Vec<ObservationSummary>> {
+    // Token ids can be reused after a deletion; the name tells them apart.
+    let mut stmt = c.prepare(
+        "SELECT s.behavior, s.token_name,
+             NOT EXISTS (SELECT 1 FROM api_tokens t WHERE t.id = s.token_id AND t.name = s.token_name),
+             s.agent, s.first_seen, s.last_seen, s.count, s.pending, s.sighting_id
+         FROM observation_sources s
+         WHERE s.observable_type = ?1 AND s.observable_value = ?2
+         ORDER BY s.behavior, s.last_seen DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![ty.as_str(), value], |r| {
+            Ok(ObservationSummary {
+                behavior: Behavior::parse_lenient(&r.get::<_, String>(0)?),
+                token: r.get(1)?,
+                token_deleted: r.get(2)?,
+                agent: r.get(3)?,
+                first_seen: parse_ts(&r.get::<_, String>(4)?),
+                last_seen: parse_ts(&r.get::<_, String>(5)?),
+                count: r.get::<_, i64>(6)? as u64,
+                pending: r.get(7)?,
+                sighting_id: r.get(8)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
 }
 
 pub fn count_pending_observations(c: &Connection) -> anyhow::Result<u64> {
@@ -1838,6 +1954,112 @@ mod tests {
             );
             mark_observation_published(c, &again[0], "https://a.example/s/1")?;
             assert!(pending_observations(c)?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn observation_sources_per_token() {
+        let db = Db::open_in_memory().unwrap();
+        db.call(|c| {
+            let now: DateTime<Utc> = "2026-10-03T10:00:00.123Z".parse()?;
+            let f2b = insert_api_token(c, "f2b", "h1", &[ApiScope::Push], Tlp::Green)?;
+            let mail = insert_api_token(c, "mail", "h2", &[ApiScope::Push], Tlp::Green)?;
+            let obs = Observation {
+                observable_type: ObservableType::Ipv4Addr,
+                observable_value: "8.8.4.4".into(),
+                behavior: Behavior::Scan,
+                port: None,
+                service: None,
+                first_seen: now,
+                last_seen: now,
+                count: 2,
+                sighting_id: None,
+                tlp: None,
+            };
+            for (token, agent) in [
+                (&f2b, Some("pubsec-fail2ban/1")),
+                (&f2b, None),
+                (&mail, None),
+            ] {
+                add_observation(c, &obs)?;
+                add_observation_source(c, &obs, token, agent)?;
+            }
+            let rows = observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?;
+            assert_eq!(rows.len(), 2);
+            let f = rows.iter().find(|r| r.token == "f2b").unwrap();
+            assert_eq!(
+                (f.count, f.agent.as_deref()),
+                (4, Some("pubsec-fail2ban/1"))
+            );
+            assert!(f.pending && !f.token_deleted);
+            let m = rows.iter().find(|r| r.token == "mail").unwrap();
+            assert_eq!((m.count, m.agent.as_deref()), (2, None));
+
+            // A token reusing a deleted token's id is not mistaken for it.
+            delete_api_token(c, mail.id)?;
+            let again = insert_api_token(c, "other", "h3", &[ApiScope::Push], Tlp::Green)?;
+            assert_eq!(again.id, mail.id);
+            let rows = observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?;
+            assert!(
+                rows.iter()
+                    .find(|r| r.token == "mail")
+                    .unwrap()
+                    .token_deleted
+            );
+            // Nor does its push merge into the deleted token's history.
+            add_observation(c, &obs)?;
+            add_observation_source(c, &obs, &again, None)?;
+            let rows = observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?;
+            assert_eq!(rows.len(), 3);
+            let m = rows.iter().find(|r| r.token == "mail").unwrap();
+            assert!(m.token_deleted);
+            assert_eq!(m.count, 2);
+            let o = rows.iter().find(|r| r.token == "other").unwrap();
+            assert!(!o.token_deleted);
+            assert_eq!(o.count, 2);
+
+            // Pending observations keep their sources through retention;
+            // published ones lose them together with the observation.
+            let later = now + TimeDelta::days(30);
+            purge_expired(c, later, later)?;
+            assert_eq!(
+                observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?.len(),
+                3
+            );
+            // A push merged in after the batch was read keeps all sources
+            // pending, as the observation itself stays pending.
+            let read = pending_observations(c)?.remove(0);
+            add_observation(c, &obs)?;
+            add_observation_source(c, &obs, &again, None)?;
+            mark_observation_published(c, &read, "https://a.example/s/1")?;
+            let rows = observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?;
+            assert!(rows.iter().all(|r| r.pending && r.sighting_id.is_none()));
+            let read = pending_observations(c)?.remove(0);
+            mark_observation_published(c, &read, "https://a.example/s/1")?;
+            let rows = observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?;
+            assert!(rows
+                .iter()
+                .all(|r| !r.pending && r.sighting_id.as_deref() == Some("https://a.example/s/1")));
+            // A later push by one token leaves the others published.
+            add_observation(c, &obs)?;
+            add_observation_source(c, &obs, &f2b, None)?;
+            let rows = observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?;
+            assert!(rows.iter().find(|r| r.token == "f2b").unwrap().pending);
+            assert!(rows.iter().filter(|r| r.token != "f2b").all(|r| !r.pending));
+            let read = pending_observations(c)?.remove(0);
+            mark_observation_published(c, &read, "https://a.example/s/2")?;
+            let rows = observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?;
+            let f = rows.iter().find(|r| r.token == "f2b").unwrap();
+            assert_eq!(f.sighting_id.as_deref(), Some("https://a.example/s/2"));
+            let m = rows.iter().find(|r| r.token == "mail").unwrap();
+            assert_eq!(m.sighting_id.as_deref(), Some("https://a.example/s/1"));
+            purge_expired(c, later, later)?;
+            assert!(
+                observations_for_observable(c, ObservableType::Ipv4Addr, "8.8.4.4")?.is_empty()
+            );
             Ok(())
         })
         .await

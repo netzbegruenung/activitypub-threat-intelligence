@@ -91,7 +91,7 @@ journalctl -u pubsecd -g ' audit: '
 ```
 
 ```
-INFO audit: observation received by="api:fail2ban" obs_type="ipv4-addr" value="45.13.7.9" behavior="ssh-bruteforce" count=12 seen="…" tlp="green"
+INFO audit: observation received by="api:fail2ban" agent="pubsec-fail2ban/2026.11.8" obs_type="ipv4-addr" value="45.13.7.9" behavior="ssh-bruteforce" count=12 seen="…" tlp="green"
 INFO audit: evidence stored by="daemon" obs_type="ipv4-addr" value="45.13.7.9" behavior="ssh-bruteforce" evidence="Sighting" id="https://ti.example.net/objects/…" tlp="green"
 INFO audit: active changed by="daemon" obs_type="ipv4-addr" value="45.13.7.9" behavior="ssh-bruteforce" changes="added,activated" active=true flagged=false suspended=false allowlisted=false expiry="…" tlp="green" support=2.0 dispute=0.0
 INFO audit: allowlist added by="control:uid=1000" obs_type="ipv4-addr" value="45.13.7.9" behavior="all" id=3 scope="local" summary="our scanner"
@@ -99,7 +99,7 @@ INFO audit: allowlist added by="control:uid=1000" obs_type="ipv4-addr" value="45
 
 | Event | When |
 |---|---|
-| `observation received` | A sensor pushed an observation (`POST /api/v1/observations`). |
+| `observation received` | A sensor pushed an observation (`POST /api/v1/observations`). `agent` is the sensor's User-Agent (e.g. `pubsec-fail2ban/…` or `pubsec-rspamd/…`), if it sent one. |
 | `evidence stored`, `evidence updated` | A Sighting, ThreatIndicator or Opinion was stored or replaced by a newer copy: from a peer (inbox or pull sync) or an own Sighting from a publish batch. |
 | `evidence withdrawn` | A peer withdrew evidence with `Delete` or a Tombstone. |
 | `evidence purged` | Retention removed evidence that can no longer contribute (Section 11). |
@@ -111,6 +111,12 @@ INFO audit: allowlist added by="control:uid=1000" obs_type="ipv4-addr" value="45
 `peer:<actor id>` or `daemon`. Strings are quoted and escaped, so remote
 values cannot break or forge lines. Pushed observations are logged one per
 line, so busy sensors produce many lines.
+
+Independently of the audit log, the daemon records which API tokens pushed
+each observable, with the last User-Agent, count and first/last seen per
+token. The TUI's Lookup tab lists them under "Local observations (own
+sensors)", together with the own Sighting they were published in. Values
+only known from peers have no such rows.
 
 The daemon opens three endpoints:
 

@@ -565,7 +565,7 @@ async fn lookup(state: &AppState, value: &str) -> anyhow::Result<LookupResult> {
     let v = value.clone();
     let local_actor = state.urls.actor.clone();
     let org = state.urls.org.clone();
-    let (evidence, assessments, mut map, allow) = state
+    let (evidence, assessments, mut map, allow, observations) = state
         .db
         .call(move |c| {
             let assessments: Vec<_> = db::list_active(c, Utc::now(), Some(ty), None, true)?
@@ -577,6 +577,7 @@ async fn lookup(state: &AppState, value: &str) -> anyhow::Result<LookupResult> {
                 assessments,
                 db::actor_operator_map(c)?,
                 db::list_allowlist(c)?,
+                db::observations_for_observable(c, ty, &v)?,
             ))
         })
         .await?;
@@ -634,5 +635,6 @@ async fn lookup(state: &AppState, value: &str) -> anyhow::Result<LookupResult> {
         assessments,
         evidence,
         local_allowlist,
+        observations,
     })
 }

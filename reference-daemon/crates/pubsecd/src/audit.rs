@@ -5,7 +5,9 @@
 //! log messages. Each event names what changed (`obs_type`, `value`,
 //! `behavior`) and who caused it (`by`, see [`Origin`]):
 //!
-//! - `observation received`: a sensor pushed an observation;
+//! - `observation received`: a sensor pushed an observation (`by` names
+//!   the API token, `agent` the sensor's User-Agent, e.g.
+//!   `pubsec-fail2ban/2026.11.8`);
 //! - `evidence stored` / `updated` / `withdrawn` / `purged`: a Sighting,
 //!   ThreatIndicator or Opinion was stored, replaced by a newer copy,
 //!   withdrawn with `Delete`, or removed by retention;
@@ -74,13 +76,15 @@ fn obs_type(o: &EvidenceObject) -> &'static str {
 }
 
 impl Audit {
-    pub fn observation(self, by: &Origin, o: &Observation) {
+    /// `agent` is the User-Agent the sensor pushed with.
+    pub fn observation(self, by: &Origin, agent: Option<&str>, o: &Observation) {
         if !self.enabled {
             return;
         }
         tracing::info!(
             target: TARGET,
             by = by.to_string().as_str(),
+            agent,
             obs_type = o.observable_type.as_str(),
             value = o.observable_value.as_str(),
             behavior = o.behavior.as_str(),

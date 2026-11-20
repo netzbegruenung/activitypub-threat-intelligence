@@ -1670,6 +1670,53 @@ fn evidence_cells(e: &EvidenceSummary) -> Vec<Span<'static>> {
         .collect()
 }
 
+/// At most this many rows of the Lookup tab's observation table are shown.
+const MAX_OBSERVATION_ROWS: usize = 8;
+
+const OBSERVATION_HEADER: [&str; 7] = [
+    "Behaviour",
+    "Token",
+    "Sensor",
+    "Count",
+    "First seen",
+    "Last seen",
+    "Sighting",
+];
+
+fn observation_widths() -> Vec<Constraint> {
+    vec![
+        Constraint::Length(20),
+        Constraint::Length(20),
+        Constraint::Length(26),
+        Constraint::Length(7),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Fill(1),
+    ]
+}
+
+fn observation_cells(o: &ObservationSummary) -> Vec<Span<'static>> {
+    let token = if o.token_deleted {
+        Span::from(format!("{} (deleted)", o.token)).dark_gray()
+    } else {
+        Span::from(o.token.clone())
+    };
+    let sighting = match (&o.sighting_id, o.pending) {
+        (_, true) => Span::from("pending").yellow(),
+        (Some(id), false) => Span::from(id.clone()),
+        (None, false) => Span::from("-"),
+    };
+    vec![
+        Span::from(o.behavior.as_str()),
+        token,
+        Span::from(o.agent.clone().unwrap_or_else(|| "-".into())),
+        Span::from(o.count.to_string()),
+        Span::from(ago(Some(o.first_seen))),
+        Span::from(ago(Some(o.last_seen))),
+        sighting,
+    ]
+}
+
 fn draw_lookup(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(l) = &app.data.lookup else {
         f.render_widget(
@@ -1680,8 +1727,9 @@ fn draw_lookup(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     let n = l.assessments.len() as u16;
-    let [top, mid, bottom] = Layout::vertical([
+    let [top, obs, mid, bottom] = Layout::vertical([
         Constraint::Length(n.max(1) + 3),
+        Constraint::Length((l.observations.len().min(MAX_OBSERVATION_ROWS) as u16).max(1) + 3),
         Constraint::Min(4),
         Constraint::Length((l.local_allowlist.len() as u16).max(1) + 2),
     ])
@@ -1698,6 +1746,39 @@ fn draw_lookup(f: &mut Frame, app: &mut App, area: Rect) {
             .block(Block::default().borders(Borders::ALL).title(title)),
         top,
     );
+    // The layout may shrink the area below the requested height, so count
+    // the rows that actually fit.
+    let shown = l
+        .observations
+        .len()
+        .min(obs.height.saturating_sub(3) as usize);
+    let obs_title = if shown < l.observations.len() {
+        format!(
+            " Local observations (own sensors, {shown} of {}) ",
+            l.observations.len()
+        )
+    } else {
+        " Local observations (own sensors) ".to_string()
+    };
+    let obs_block = Block::default().borders(Borders::ALL).title(obs_title);
+    if l.observations.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from("none").dark_gray()).block(obs_block),
+            obs,
+        );
+    } else {
+        let rows: Vec<Row> = l
+            .observations
+            .iter()
+            .map(|o| to_row(observation_cells(o)))
+            .collect();
+        f.render_widget(
+            Table::new(rows, observation_widths())
+                .header(header_row(&OBSERVATION_HEADER))
+                .block(obs_block),
+            obs,
+        );
+    }
     let lines: Vec<Line> = if l.local_allowlist.is_empty() {
         vec![Line::from("none").dark_gray()]
     } else {

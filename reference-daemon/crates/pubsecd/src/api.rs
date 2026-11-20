@@ -235,15 +235,23 @@ async fn push(
         });
     }
     let n = accepted.len();
-    let accepted = match state
+    // Names the sensor (e.g. `pubsec-rspamd/2026.11.8`) when several share a
+    // token. Client-supplied, so only informational.
+    let agent = sanitize(
+        headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok()),
+    );
+    let (accepted, token, agent) = match state
         .db
         .call(move |c| {
             let tx = c.transaction()?;
             for o in &accepted {
                 db::add_observation(&tx, o)?;
+                db::add_observation_source(&tx, o, &token, agent.as_deref())?;
             }
             tx.commit()?;
-            Ok(accepted)
+            Ok((accepted, token, agent))
         })
         .await
     {
@@ -252,7 +260,7 @@ async fn push(
     };
     let by = Origin::Api(token.name);
     for o in &accepted {
-        state.audit.observation(&by, o);
+        state.audit.observation(&by, agent.as_deref(), o);
     }
     Json(PushResult {
         accepted: n,
