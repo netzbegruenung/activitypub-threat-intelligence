@@ -81,6 +81,8 @@ pub struct AppState {
     pub last_recompute: Mutex<Option<DateTime<Utc>>>,
     /// Serialises hub-mode follow-back and withdrawal for connecting nodes.
     pub hub_lock: tokio::sync::Mutex<()>,
+    /// Serialises the background re-fetches of `Announce`d objects.
+    pub announce_lock: tokio::sync::Mutex<()>,
     rate: Mutex<HashMap<String, (Instant, u32)>>,
 }
 
@@ -110,6 +112,7 @@ impl AppState {
             deliver_now: Notify::new(),
             last_recompute: Mutex::new(None),
             hub_lock: tokio::sync::Mutex::new(()),
+            announce_lock: tokio::sync::Mutex::new(()),
             rate: Mutex::new(HashMap::new()),
         })
     }

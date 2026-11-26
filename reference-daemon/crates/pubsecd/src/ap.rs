@@ -68,6 +68,15 @@ pub async fn authenticate(
 ) -> Result<String, Response> {
     let sig = httpsig::signature_from_headers(headers)
         .map_err(|e| status(StatusCode::UNAUTHORIZED, &e.to_string()))?;
+    // The signature covers `Host`, but only binds the request to this
+    // server if that header names us. Otherwise a request a peer signed for
+    // another server could be replayed here under the peer's identity.
+    if !host_is_ours(state, headers) {
+        return Err(status(
+            StatusCode::UNAUTHORIZED,
+            "request was not signed for this host",
+        ));
+    }
     let pq = path_and_query(uri);
     let max_age = TimeDelta::seconds(state.cfg.federation.signature_max_age_secs);
     // Try the cached key first, then refetch once (key rotation). A key that
@@ -96,7 +105,16 @@ pub async fn authenticate(
             Utc::now(),
             max_age,
         ) {
-            Ok(()) => return Ok(actor.id),
+            Ok(()) => {
+                // Cache the actor only now that it proved to hold the key.
+                if fresh {
+                    if let Err(e) = client::store_actor(state, &actor).await {
+                        tracing::error!(actor = %actor.id, "storing actor: {e:#}");
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                    }
+                }
+                return Ok(actor.id);
+            }
             Err(e @ (httpsig::SigError::Invalid | httpsig::SigError::Key)) if !fresh => {
                 tracing::debug!("signature check failed with cached key: {e}");
             }
@@ -107,6 +125,26 @@ pub async fn authenticate(
         StatusCode::UNAUTHORIZED,
         "signature verification failed",
     ))
+}
+
+/// Whether the request's `Host` header is this instance's public authority
+/// (`instance.base_url`). The scheme's default port may be spelled out.
+fn host_is_ours(state: &Shared, headers: &HeaderMap) -> bool {
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let (Some(host), None) = (hosts.next(), hosts.next()) else {
+        return false;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    let host = host.trim().to_ascii_lowercase();
+    let own = state.cfg.authority().to_ascii_lowercase();
+    let base = &state.cfg.instance.base_url;
+    let default_port = match (base.port(), base.port_or_known_default()) {
+        (None, Some(p)) => Some(p),
+        _ => None,
+    };
+    host == own || default_port.is_some_and(|p| host == format!("{own}:{p}"))
 }
 
 /// Optional authentication: unsigned requests yield `None`.
@@ -257,8 +295,22 @@ async fn inbox_post(
     let Some(id) = activity["id"].as_str().map(String::from) else {
         return status(StatusCode::BAD_REQUEST, "activity without id");
     };
+    // The id is stored for replay protection (and as the Follow id).
+    if id.len() > client::MAX_URL_LEN {
+        return status(StatusCode::BAD_REQUEST, "activity id is too long");
+    }
     if client::host_of(&id) != client::host_of(&signer) {
         return status(StatusCode::FORBIDDEN, "activity id origin mismatch");
+    }
+    // Anyone can sign as an actor of their own. Activities that will be
+    // ignored anyway are dropped before anything is stored for them.
+    match inbox::relevant(&state, &signer, &activity).await {
+        Ok(true) => {}
+        Ok(false) => return StatusCode::ACCEPTED.into_response(),
+        Err(e) => {
+            tracing::error!("inbox: {e:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     }
     match state.db.call(move |c| db::mark_processed(c, &id)).await {
         Ok(true) => {}

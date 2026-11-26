@@ -108,6 +108,8 @@ pub struct Federation {
     /// Remote key fetches per registrable domain per minute. Applies before
     /// signature verification, so it bounds unauthenticated fetches.
     pub key_fetch_rate_per_minute: u32,
+    /// Remote key fetches per minute in total, across all domains.
+    pub key_fetch_total_rate_per_minute: u32,
     /// Max HTTP signature age.
     pub signature_max_age_secs: i64,
     /// Live evidence objects stored per remote publisher; further new
@@ -134,6 +136,7 @@ impl Default for Federation {
             delivery_max_attempts: 12,
             inbox_rate_per_minute: 120,
             key_fetch_rate_per_minute: 30,
+            key_fetch_total_rate_per_minute: 300,
             signature_max_age_secs: 12 * 3600,
             max_evidence_per_publisher: 100_000,
             auto_follow_back: false,

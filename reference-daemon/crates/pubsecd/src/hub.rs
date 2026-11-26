@@ -200,12 +200,46 @@ async fn trust_operator(state: &AppState, follower: &str) {
         trusted: true,
         weight: state.cfg.policy.auto_trust_weight,
     };
-    let op = operator.clone();
-    match state
+    // An operator is whatever Organization a node names, and one server can
+    // name as many as it likes. Automatic trust is therefore given to one
+    // operator per registrable domain: further operators whose nodes live
+    // on a domain that already has an automatically trusted one would let a
+    // single party reach the quorum alone. An administrator can still trust
+    // them by hand.
+    let domain = client::fallback_operator(follower);
+    let (op, f, d) = (operator.clone(), follower.to_string(), domain.clone());
+    let inserted = state
         .db
-        .call(move |c| db::insert_auto_operator_policy(c, &op, policy))
-        .await
-    {
+        .call(move |c| {
+            let trusted: std::collections::HashSet<String> =
+                db::list_auto_operators(c)?.into_iter().collect();
+            let rival = db::actor_operator_map(c)?
+                .into_iter()
+                .find(|(actor, (o, _))| {
+                    *actor != f
+                        && *o != op
+                        && trusted.contains(o)
+                        && client::fallback_operator(actor) == d
+                })
+                .map(|(_, (o, _))| o);
+            if let Some(rival) = rival {
+                return Ok(Err(rival));
+            }
+            Ok(Ok(db::insert_auto_operator_policy(c, &op, policy)?))
+        })
+        .await;
+    let inserted = match inserted {
+        Ok(Ok(inserted)) => Ok(inserted),
+        Ok(Err(rival)) => {
+            tracing::warn!(
+                follower, %operator, %domain, trusted = %rival,
+                "auto-trust skipped: another operator on this domain is already trusted automatically"
+            );
+            return;
+        }
+        Err(e) => Err(e),
+    };
+    match inserted {
         Ok(true) => {
             state.recompute.notify_one();
             tracing::info!(follower, %operator, "auto-trusted operator");

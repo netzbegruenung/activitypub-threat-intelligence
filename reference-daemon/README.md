@@ -124,7 +124,9 @@ The daemon opens three endpoints:
 
 - **Public listener** (`[public].bind`): the ActivityPub endpoints. Run it
   behind a TLS-terminating reverse proxy that passes the `Host` header through
-  unchanged, because HTTP signatures cover it.
+  unchanged, because HTTP signatures cover it. Signed requests whose `Host`
+  is not the host of `instance.base_url` are rejected with `401`, so a
+  request signed for another server cannot be replayed here.
 - **Internal REST API** (`[api].bind`): bearer tokens managed in `pubsec-tui`
   (see [API tokens](#api-tokens)).
   Bind it to an internal address only.
@@ -305,8 +307,8 @@ Token scopes:
 
 | Scope | Allows |
 |---|---|
-| `read` | Listing entries |
-| `allowlist` | Adding and removing local entries |
+| `read` | Listing local entries and published entries up to the token's `max_tlp`, without `source` |
+| `allowlist` | Listing all entries; adding and removing local entries |
 | `allowlist` + `publish` | Also published entries, which are federated as `strongly-disagree` Opinions |
 
 ```sh
@@ -330,7 +332,7 @@ POST fields:
 - `validUntil`;
 - `summary`: the rationale, published with the Opinion of a published entry;
 - `source`: who manages the entry (for example a sync tool). It is stored
-  and returned, but never published.
+  and returned to tokens with the `allowlist` scope, but never published.
 
 Behaviour:
 - **Idempotent POST:** if an unexpired entry with the same scope, value and
@@ -839,7 +841,11 @@ false`, otherwise when an administrator approves it), the hub:
    true`, at weight `auto_trust_weight`, default 1), so its CLEAR evidence
    counts toward the quorum `k`. An operator that already has a policy, set
    in `[[policy.operator]]` or with the TUI, keeps it: auto-trust never
-   overrides an administrator's decision.
+   overrides an administrator's decision. Only one operator per registrable
+   domain is trusted automatically: a node whose domain already hosts a node
+   of another automatically trusted operator is followed back but not
+   trusted (logged as `auto-trust skipped`), until an administrator trusts
+   it by hand.
 
 When the node disconnects (it sends `Undo{Follow}`, or an administrator
 rejects its follow), the hub undoes its automatic follow-back and removes the
@@ -859,9 +865,11 @@ TLP:CLEAR, its active list and timeline contain TLP:CLEAR entries only. See
 > **Trust model:** the quorum sums weight per *operator*, so two nodes of one
 > operator count once. But operators are self-declared: an operator is a
 > verified `operator` Organization document, or else the node's registrable
-> domain. Anyone who controls a domain can publish several Organization
-> documents or use several domains, and so present as several operators.
-> A single party can therefore meet `k = 2` and list an observable on its own.
+> domain. Several Organization documents for nodes on one registrable domain
+> get automatic trust only once, but anyone can use several domains and so
+> present as several operators.
+> A single party can therefore still meet `k = 2` and list an observable on
+> its own.
 > Treat the hub's active list as "reported by feeds of at least `k`
 > self-declared operators", not as a verdict.
 

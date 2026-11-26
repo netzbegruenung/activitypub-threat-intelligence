@@ -203,6 +203,37 @@ async fn delete_ids(state: &AppState, actor: &str, ids: Vec<String>) -> anyhow::
         .await
 }
 
+/// Pending follow requests kept at once. Anyone can send a `Follow`, so
+/// without a bound the follower table grows with every actor that tries.
+pub const MAX_PENDING_FOLLOWERS: u64 = 10_000;
+
+/// Whether a verified activity from `actor` can have any effect, given our
+/// relationship with the actor. Everything else is acknowledged and dropped
+/// without leaving a record.
+pub async fn relevant(state: &AppState, actor: &str, activity: &Value) -> anyhow::Result<bool> {
+    let kind = activity["type"].as_str().unwrap_or_default().to_string();
+    if kind == "Follow" {
+        return Ok(id_of(&activity["object"]) == Some(state.urls.actor.as_str()));
+    }
+    let a = actor.to_string();
+    state
+        .db
+        .call(move |c| {
+            Ok(match kind.as_str() {
+                "Undo" => db::get_follower(c, &a)?.is_some(),
+                "Accept" | "Reject" | "Create" | "Update" | "Announce" => db::is_following(c, &a)?,
+                // An actor we no longer follow can still withdraw evidence
+                // we hold.
+                "Delete" => {
+                    db::is_following(c, &a)?
+                        || db::count_evidence_by_publisher(c, &a, Tlp::Red)? > 0
+                }
+                _ => false,
+            })
+        })
+        .await
+}
+
 /// Process a verified activity from `actor` (signature already checked).
 pub async fn process(state: &Shared, actor: &str, activity: &Value) -> anyhow::Result<()> {
     let kind = activity["type"].as_str().unwrap_or_default();
@@ -222,10 +253,26 @@ pub async fn process(state: &Shared, actor: &str, activity: &Value) -> anyhow::R
             let manual = state.cfg.publish.manually_approves_followers;
             let state_s = if manual { "pending" } else { "accepted" };
             let (a, f) = (actor.to_string(), follow_id.clone());
-            state
+            let stored = state
                 .db
-                .call(move |c| db::upsert_follower(c, &a, &f, state_s))
+                .call(move |c| {
+                    if manual
+                        && db::get_follower(c, &a)?.is_none()
+                        && db::count_pending_followers(c)? >= MAX_PENDING_FOLLOWERS
+                    {
+                        return Ok(false);
+                    }
+                    db::upsert_follower(c, &a, &f, state_s)?;
+                    Ok(true)
+                })
                 .await?;
+            if !stored {
+                tracing::warn!(
+                    actor,
+                    "follow request dropped: {MAX_PENDING_FOLLOWERS} requests are already pending"
+                );
+                return Ok(());
+            }
             let accepted = {
                 let a = actor.to_string();
                 state
@@ -319,50 +366,31 @@ pub async fn process(state: &Shared, actor: &str, activity: &Value) -> anyhow::R
             changed = delete_ids(state, actor, ids).await? > 0;
         }
         "Announce" => {
-            // Re-fetch each object from its origin (Section 8). Only objects
-            // hosted alongside an actor we follow can be relevant; fetching
-            // anything else would let any signer make us issue requests to
-            // arbitrary URLs.
+            // Only actors we follow may make us fetch anything; otherwise
+            // any signer could turn this node into a source of requests
+            // against our peers.
+            if !following {
+                tracing::debug!(actor, "ignoring Announce from actor we do not follow");
+                return Ok(());
+            }
             if objects.len() > MAX_BATCH {
                 anyhow::bail!("activity exceeds {MAX_BATCH} objects");
             }
-            let followed_hosts: HashSet<String> = state
-                .db
-                .call(|c| db::list_following(c))
-                .await?
+            let ids: Vec<String> = objects
                 .iter()
-                .filter_map(|f| host_of(&f.actor))
+                .filter_map(|v| id_of(v).map(String::from))
                 .collect();
-            for v in &objects {
-                let Some(id) = id_of(v) else { continue };
-                if !host_of(id).is_some_and(|h| followed_hosts.contains(&h)) {
-                    tracing::debug!(
-                        actor,
-                        id,
-                        "ignoring Announce of object on an unfollowed origin"
-                    );
-                    continue;
+            // The re-fetches run in the background, one Announce at a time,
+            // so the delivery does not wait on other servers.
+            let (state, actor) = (state.clone(), actor.to_string());
+            tokio::spawn(async move {
+                let _guard = state.announce_lock.lock().await;
+                match fetch_announced(&state, &actor, ids).await {
+                    Ok(true) => state.recompute.notify_one(),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(actor, "announce processing failed: {e:#}"),
                 }
-                let fetched = match client::signed_get(state, id).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::debug!("announce re-fetch of {id} failed: {e:#}");
-                        continue;
-                    }
-                };
-                if fetched["id"].as_str() != Some(id) {
-                    continue;
-                }
-                let Some(publisher) = fetched["attributedTo"].as_str().map(String::from) else {
-                    continue;
-                };
-                let p = publisher.clone();
-                if !state.db.call(move |c| db::is_following(c, &p)).await? {
-                    continue;
-                }
-                let r = ingest_objects(state, &publisher, vec![fetched], false).await?;
-                changed |= r.changed();
-            }
+            });
         }
         _ => {}
     }
@@ -370,6 +398,50 @@ pub async fn process(state: &Shared, actor: &str, activity: &Value) -> anyhow::R
         state.recompute.notify_one();
     }
     Ok(())
+}
+
+/// Re-fetch announced objects from their origin (Section 8) and ingest
+/// those published by actors we follow. Only objects hosted alongside a
+/// followed actor can be relevant. Returns whether anything changed.
+async fn fetch_announced(state: &AppState, actor: &str, ids: Vec<String>) -> anyhow::Result<bool> {
+    let followed_hosts: HashSet<String> = state
+        .db
+        .call(|c| db::list_following(c))
+        .await?
+        .iter()
+        .filter_map(|f| host_of(&f.actor))
+        .collect();
+    let mut changed = false;
+    for id in &ids {
+        if !host_of(id).is_some_and(|h| followed_hosts.contains(&h)) {
+            tracing::debug!(
+                actor,
+                id,
+                "ignoring Announce of object on an unfollowed origin"
+            );
+            continue;
+        }
+        let fetched = match client::signed_get(state, id).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!("announce re-fetch of {id} failed: {e:#}");
+                continue;
+            }
+        };
+        if fetched["id"].as_str() != Some(id.as_str()) {
+            continue;
+        }
+        let Some(publisher) = fetched["attributedTo"].as_str().map(String::from) else {
+            continue;
+        };
+        let p = publisher.clone();
+        if !state.db.call(move |c| db::is_following(c, &p)).await? {
+            continue;
+        }
+        let r = ingest_objects(state, &publisher, vec![fetched], false).await?;
+        changed |= r.changed();
+    }
+    Ok(changed)
 }
 
 /// Send Accept/Reject for a follower's Follow.

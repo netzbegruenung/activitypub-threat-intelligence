@@ -663,6 +663,22 @@ pub struct AllowlistOut {
     pub created: DateTime<Utc>,
 }
 
+/// What a token may read of the allowlist. Tokens with the `allowlist` scope
+/// manage the list and see all of it. Read-only tokens see published entries
+/// up to their `max_tlp`, like the active list and the timeline, and never
+/// the internal `source` note.
+fn allowlist_view(token: &ApiTokenInfo, e: AllowlistEntry) -> Option<AllowlistOut> {
+    if token.scopes.contains(&ApiScope::Allowlist) {
+        return Some(e.into());
+    }
+    if e.tlp.is_some_and(|t| t > token.max_tlp) {
+        return None;
+    }
+    let mut out = AllowlistOut::from(e);
+    out.source = None;
+    Some(out)
+}
+
 impl From<AllowlistEntry> for AllowlistOut {
     fn from(e: AllowlistEntry) -> Self {
         Self {
@@ -727,14 +743,16 @@ async fn allowlist_list(
     headers: HeaderMap,
     Query(q): Query<AllowlistQuery>,
 ) -> Response {
-    if let Err(r) = authorise_any(&state, &headers, &[ApiScope::Read, ApiScope::Allowlist]).await {
-        return r;
-    }
+    let token = match authorise_any(&state, &headers, &[ApiScope::Read, ApiScope::Allowlist]).await
+    {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     match allowlist::list(&state).await {
         Ok(list) => Json(
             list.into_iter()
                 .filter(|e| q.scope.is_none_or(|s| s == e.scope))
-                .map(AllowlistOut::from)
+                .filter_map(|e| allowlist_view(&token, e))
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -747,11 +765,17 @@ async fn allowlist_get(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
-    if let Err(r) = authorise_any(&state, &headers, &[ApiScope::Read, ApiScope::Allowlist]).await {
-        return r;
-    }
-    match allowlist::get(&state, id).await {
-        Ok(Some(e)) => Json(AllowlistOut::from(e)).into_response(),
+    let token = match authorise_any(&state, &headers, &[ApiScope::Read, ApiScope::Allowlist]).await
+    {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    // An entry above the token's TLP looks like a missing one.
+    match allowlist::get(&state, id)
+        .await
+        .map(|e| e.and_then(|e| allowlist_view(&token, e)))
+    {
+        Ok(Some(e)) => Json(e).into_response(),
         Ok(None) => allowlist_error(AllowlistError::NotFound(id)),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
     }

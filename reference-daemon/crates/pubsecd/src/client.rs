@@ -193,9 +193,18 @@ pub fn as_list(v: &Value) -> Vec<&Value> {
     }
 }
 
+/// Longest URL accepted in an actor document or as an activity id.
+pub const MAX_URL_LEN: usize = 2048;
+/// Longest `publicKeyPem` kept; a 4096-bit RSA key takes about 800 bytes.
+const MAX_KEY_PEM_LEN: usize = 16 * 1024;
+
 fn parse_actor(id: &str, doc: &Value) -> anyhow::Result<RemoteActor> {
     if doc["id"].as_str() != Some(id) {
         bail!("actor document id does not match {id}");
+    }
+    // Actor documents are stored; bound what a remote server can make us keep.
+    if id.len() > MAX_URL_LEN {
+        bail!("actor id is too long");
     }
     // Actor ids and claims are shown in the TUI and written to logs.
     if id.chars().any(char::is_control) {
@@ -214,7 +223,14 @@ fn parse_actor(id: &str, doc: &Value) -> anyhow::Result<RemoteActor> {
     if !same_host(inbox, id) {
         bail!("actor inbox is hosted on a different origin");
     }
-    let local = |v: Option<&str>| v.filter(|u| same_host(u, id)).map(String::from);
+    if inbox.len() > MAX_URL_LEN {
+        bail!("actor inbox URL is too long");
+    }
+    let clean = move |v: Option<&str>| clean(v.filter(|s| s.len() <= MAX_URL_LEN));
+    let local = |v: Option<&str>| {
+        v.filter(|u| u.len() <= MAX_URL_LEN && same_host(u, id))
+            .map(String::from)
+    };
     let key = as_list(&doc["publicKey"])
         .into_iter()
         .find(|k| k["owner"].as_str().is_none_or(|o| o == id))
@@ -225,6 +241,16 @@ fn parse_actor(id: &str, doc: &Value) -> anyhow::Result<RemoteActor> {
         if host_of(k) != host_of(id) {
             bail!("actor key is hosted on a different origin");
         }
+        if k.len() > MAX_URL_LEN {
+            bail!("actor key id is too long");
+        }
+    }
+    let public_key_pem = key["publicKeyPem"].as_str().map(String::from);
+    if public_key_pem
+        .as_ref()
+        .is_some_and(|p| p.len() > MAX_KEY_PEM_LEN)
+    {
+        bail!("actor public key is too large");
     }
     Ok(RemoteActor {
         id: id.to_string(),
@@ -233,7 +259,7 @@ fn parse_actor(id: &str, doc: &Value) -> anyhow::Result<RemoteActor> {
         followers: local(doc["followers"].as_str()),
         active_objects: local(id_of(&doc["activeObjects"])),
         key_id,
-        public_key_pem: key["publicKeyPem"].as_str().map(String::from),
+        public_key_pem,
         operator_claim: clean(id_of(&doc["operator"])),
         preferred_username: clean(doc["preferredUsername"].as_str()),
         name: doc["name"].as_str().and_then(display_text),
@@ -298,9 +324,25 @@ pub async fn fetch_actor(state: &AppState, id: &str, force: bool) -> anyhow::Res
             }
         }
     }
-    let doc = signed_get(state, &id).await?;
-    let actor = parse_actor(&id, &doc)?;
-    let (operator, source) = resolve_operator(state, &actor).await;
+    let actor = fetch_actor_unsaved(state, &id).await?;
+    store_actor(state, &actor).await?;
+    Ok(actor)
+}
+
+/// Fetch and parse a remote actor document without storing it or resolving
+/// its operator.
+async fn fetch_actor_unsaved(state: &AppState, id: &str) -> anyhow::Result<RemoteActor> {
+    let id = id.split('#').next().unwrap_or(id);
+    if id == state.urls.actor {
+        bail!("refusing to fetch own actor");
+    }
+    let doc = signed_get(state, id).await?;
+    parse_actor(id, &doc)
+}
+
+/// Resolve the operator of a fetched actor and cache both.
+pub async fn store_actor(state: &AppState, actor: &RemoteActor) -> anyhow::Result<()> {
+    let (operator, source) = resolve_operator(state, actor).await;
     let a = actor.clone();
     state
         .db
@@ -308,12 +350,15 @@ pub async fn fetch_actor(state: &AppState, id: &str, force: bool) -> anyhow::Res
             db::upsert_remote_actor(c, &a)?;
             db::set_actor_operator(c, &a.id, &operator, source)
         })
-        .await?;
-    Ok(actor)
+        .await
 }
 
 /// Find the actor owning `key_id`, from cache or by fetching it.
-/// The flag is `true` if the actor was freshly fetched.
+/// The flag is `true` if the actor was freshly fetched. A freshly fetched
+/// actor is **not stored**: the request it signed is not verified yet, and
+/// anyone can name any key. The caller stores it with [`store_actor`] once
+/// the signature checks out, so unauthenticated requests cost one fetch
+/// and leave nothing behind.
 pub async fn actor_for_key(
     state: &AppState,
     key_id: &str,
@@ -329,13 +374,23 @@ pub async fn actor_for_key(
             return Ok((a, false));
         }
     }
+    if key_id.len() > MAX_URL_LEN {
+        bail!("key id is too long");
+    }
     // Key fetches happen before the request is authenticated; bound them
-    // per registrable domain so that subdomains do not multiply the budget.
+    // per registrable domain so that subdomains do not multiply the budget,
+    // and in total so that many domains or IP literals do not either.
     let bucket = format!("key-fetch {}", fallback_operator(key_id));
     if !state.rate_limit(&bucket, state.cfg.federation.key_fetch_rate_per_minute) {
         bail!("key fetch rate limit exceeded for {bucket}");
     }
-    let actor = fetch_actor(state, key_id, true).await?;
+    if !state.rate_limit(
+        "key-fetch-total",
+        state.cfg.federation.key_fetch_total_rate_per_minute,
+    ) {
+        bail!("total key fetch rate limit exceeded");
+    }
+    let actor = fetch_actor_unsaved(state, key_id).await?;
     if actor.key_id.as_deref() != Some(key_id) {
         bail!("key {key_id} is not the key of {}", actor.id);
     }

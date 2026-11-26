@@ -61,6 +61,8 @@ inbox_rate_per_minute = 120
 # Key fetches for unknown signers per registrable domain (before the
 # signature is verified).
 key_fetch_rate_per_minute = 30
+# The same, in total across all domains.
+key_fetch_total_rate_per_minute = 300
 signature_max_age_secs = 43200
 # New evidence objects beyond this many live objects per remote publisher
 # are dropped.
