@@ -47,6 +47,9 @@ defaults=
 for j in $enabled; do
     case "$j" in
         pubsecd-ban | pubsec-*) continue ;;
+        # recidive re-bans what other jails banned, including the pull jail:
+        # reporting it would re-publish peers' evidence as own sightings.
+        recidive) continue ;;
     esac
     choices="${choices:+$choices, }$j"
     defaults="${defaults:+$defaults, }$j"

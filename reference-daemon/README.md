@@ -35,7 +35,8 @@ Logging uses `RUST_LOG`, e.g. `RUST_LOG=pubsecd=debug`.
 Every release ships amd64 `.deb` packages for `pubsecd` (which also contains
 `pubsec-tui`), `pubsec-fail2ban`, `pubsec-rspamd`, `pubsec-statsd`, `pubsec-allowlist`
 and `pubsec-dashboard`. Each one installs the binary, a systemd unit and the
-default configuration as a conffile under `/etc/<name>/config.toml`, plus the
+default configuration as a conffile under `/etc/<name>/config.toml` (mode
+0640, group of the service user, where it holds an API token), plus the
 fail2ban filter and the Rspamd drop-ins where applicable. `pubsec-fail2ban`
 and `pubsec-rspamd` instead generate their configuration from questions asked
 at install time (see their sections below). The units are
@@ -385,7 +386,8 @@ interactively on install. It asks for
 
 The jail list offers the jails that are already enabled on the host (read from
 `jail.conf` and `jail.d/`) plus the ones this package ships, and preselects the
-enabled ones. Each selected jail is written to `[push.jails.<jail>]` with a
+enabled ones. `recidive` is never offered (see the feedback-loop note under
+[Push](#push)). Each selected jail is written to `[push.jails.<jail>]` with a
 behaviour from a built-in table; unknown jails fall back to `other`.
 
 `/etc/pubsec-fail2ban/config.toml` is generated from the answers and managed
@@ -396,6 +398,20 @@ dpkg-reconfigure pubsec-fail2ban
 ```
 
 The tokens are removed from the debconf database once written.
+
+Before fail2ban is reloaded, the package runs `fail2ban-client -t`. A jail
+that makes fail2ban reject its configuration, typically because the log file
+it reads does not exist on this host, is taken out again and named in a
+warning; if the configuration is invalid for another reason, fail2ban is not
+reloaded.
+
+With bans enabled, the package installs two files: the `pubsecd-ban` jail and
+`pubsec-recidive.local`, which keeps fail2ban's `recidive` jail away from the
+imported bans. The `pubsecd-ban` jail blocks **all ports** for every listed
+address and prefix, whatever behaviour it was listed for. Put your own
+networks into `ignoreip` of `/etc/fail2ban/jail.d/pubsecd-ban.local` and into
+the pubsecd allowlist, and restrict `behaviors` of the `[[pull.output]]` if
+that is too broad.
 
 ### Shipped filters and jails
 
@@ -445,6 +461,12 @@ overwrites an existing file.
 > **Feedback loop:** put the jails fed by `pull` (e.g. `pubsecd-ban`) into
 > `push.ignore_jails`. Otherwise bans imported from peers would be published
 > again as your own Sightings.
+>
+> fail2ban's `recidive` jail bans what other jails banned repeatedly,
+> including the pull jail. It is therefore never reported, even if it is
+> mapped or `default_behavior` is set. Also install
+> `jail.d/pubsec-recidive.local`: without it `recidive` bans an address that
+> peers list several times a day for a week, far beyond its effective expiry.
 
 ### Pull
 
@@ -453,7 +475,11 @@ overwrites an existing file.
    ```sh
    cp crates/pubsec-fail2ban/fail2ban/filter.d/pubsec.conf /etc/fail2ban/filter.d/
    cp crates/pubsec-fail2ban/fail2ban/jail.d/pubsecd-ban.local /etc/fail2ban/jail.d/
+   cp crates/pubsec-fail2ban/fail2ban/jail.d/pubsec-recidive.local /etc/fail2ban/jail.d/
    ```
+
+   The jail blocks all ports for every address and prefix in the file. Set
+   `ignoreip` in it for your own networks before enabling it.
 
    The Debian package does this for you; see [Package
    configuration](#package-configuration).
@@ -608,6 +634,10 @@ installs these files for Rspamd:
 | `/etc/rspamd/modules.local.d/pubsec.conf` | plugin settings without the secret (conffile) |
 | `/etc/rspamd/local.d/pubsec_secret.inc` | the report secret, copied from `ingest.report_secret` (generated randomly on install) whenever the package is configured; do not edit |
 | `/etc/rspamd/local.d/pubsec_multimap.inc` | the `PUBSEC_BAD_*` multimap rules (conffile) |
+
+Before Rspamd is reloaded, the package runs `rspamadm configtest`. If Rspamd
+rejects its configuration because of the changes the package made, they are
+taken back; in either case an invalid configuration is not reloaded.
 
 `/etc/rspamd/local.d/pubsec.conf` stays yours for overriding the plugin
 settings. Do not set `secret` there.

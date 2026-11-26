@@ -1,6 +1,6 @@
 # Rendered into the postrm of pubsec-fail2ban, inside the "purge" branch.
 
-for jail in $PUBSEC_OWN_JAILS pubsecd-ban; do
+for jail in $PUBSEC_OWN_JAILS pubsecd-ban pubsec-recidive; do
     rm -f "/etc/fail2ban/jail.d/$jail.local"
 done
 

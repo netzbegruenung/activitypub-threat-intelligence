@@ -8,6 +8,19 @@
 #
 # This jail is listed in `ignore_jails` of pubsec-fail2ban's [push] section, so
 # imported bans are not re-published as own sightings.
+#
+# SCOPE: this jail blocks ALL ports for every address in the file, whatever
+# it was listed for. With `behaviors = []` in the [[pull.output]] that writes
+# the file, an address listed for smtp-spam also loses access to SSH and the
+# web server, and prefixes (down to /24 and /48) are banned as a whole. To
+# narrow this down, restrict `behaviors` (and `port`) of the output, or use
+# one output and one jail per service, each with its own `port`.
+#
+# LOCK-OUT: the entries come from your peers. Make sure your own networks can
+# never be banned: list them in `ignoreip` (here or in [DEFAULT] of
+# jail.local) and in the pubsecd allowlist (pubsec-allowlist, pubsec-tui).
+#
+# The file is called ssh.log for historical reasons; it is not limited to SSH.
 
 [pubsecd-ban]
 enabled  = true
@@ -20,3 +33,6 @@ findtime = 3600
 bantime  = 3600
 # Do not let bantime.increment grow imported bans.
 bantime.increment = false
+# Networks that must never be banned by peers' evidence, e.g. your office and
+# management networks (space separated, CIDR allowed):
+#ignoreip = 127.0.0.1/8 ::1 192.0.2.0/24

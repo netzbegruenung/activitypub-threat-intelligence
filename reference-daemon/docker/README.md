@@ -56,6 +56,21 @@ linked against glibc.
   fed by `pull`. That jail is in `push.ignore_jails`; keep it there.
 - **Host with legacy iptables:** set `banaction = iptables-multiport` in
   `00-defaults.local`.
+- **Services in other containers:** the default action bans on the `input`
+  hook, which only covers services of the host itself (such as its sshd,
+  protected by `pubsecd-ssh`). Traffic to published container ports is
+  forwarded and never passes `input`. Jails for container services must ban
+  on the `forward` hook and name the **container** port, as in
+  `fail2ban/jail.d/landscape.local.example`
+  (`chain = f2b-forward` and
+  `banaction = nftables[type=multiport, chain_hook=forward]`).
+  With legacy iptables use `iptables-multiport[chain=DOCKER-USER]` instead.
+  Check with `nft list table inet f2b-table` that the bans end up in a chain
+  on the right hook.
+- **recidive:** if you enable fail2ban's `recidive` jail, keep it in
+  `push.ignore_jails` and add `ignoreregex = \[pubsecd-ssh\]\s+Ban\s` to its
+  section, so that bans imported from peers are neither prolonged to a week
+  nor re-published as your own Sightings.
 
 ## Public hub (pubsec-statsd)
 

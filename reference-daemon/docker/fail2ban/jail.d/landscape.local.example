@@ -1,12 +1,28 @@
 # Jails for the logs mounted by compose.landscape.example.yaml.
 # Copy to landscape.local (only *.local and *.conf are read).
 # Each jail's name must be mapped in [push.jails.<name>] of pubsec-fail2ban.toml.
+#
+# These services run in containers. Docker forwards traffic to their published
+# ports, so it passes the "forward" hook of the host's netfilter and never
+# "input", where the default action of 00-defaults.local bans. The jails below
+# therefore ban in a chain of their own on the forward hook; without that the
+# bans would be logged and reported but block nothing.
+#
+# Forwarded packets carry the port of the container, not the published one
+# (Docker rewrites it before forwarding): `port` must be the CONTAINER port.
+
 [apache-auth]
 enabled = true
+# Container port (compose: "80:80").
 port    = http,https
 logpath = /var/log/apache2/error_log
+chain   = f2b-forward
+banaction = nftables[type=multiport, chain_hook=forward]
 
 [sshd]
 enabled = true
-port    = ssh
+# Container port (compose: "2222:2222").
+port    = 2222
 logpath = /var/log/sshd/openssh/current
+chain   = f2b-forward
+banaction = nftables[type=multiport, chain_hook=forward]

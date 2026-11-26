@@ -38,6 +38,7 @@ begin_pkg() {
     postinst_configure=
     postrm_purge=
     rm_conffiles=
+    secret_confs=
 }
 
 # rm_conffile ABSOLUTE_PATH LAST_VERSION_THAT_SHIPPED_IT
@@ -64,6 +65,15 @@ add_bin() {
 add_conf() {
     install -D -m 0644 "$1" "$d$2"
     echo "$2" >>"$d/DEBIAN/conffiles"
+}
+
+# add_secret_conf SOURCE ABSOLUTE_TARGET
+# A conffile that holds API tokens. Shipped root:root 0640; the postinst hands
+# it to the group of the service user, so no other local user can read it.
+add_secret_conf() {
+    install -D -m 0640 "$1" "$d$2"
+    echo "$2" >>"$d/DEBIAN/conffiles"
+    secret_confs="$secret_confs $2"
 }
 
 add_share() {
@@ -162,6 +172,21 @@ if [ "\$1" = configure ]; then
     fi
 fi
 EOF
+    if [ -n "$secret_confs" ]; then
+        # On every configure: versions up to 2026.11.11 shipped these files
+        # world-readable, and dpkg keeps the mode of an existing conffile.
+        cat >>"$d/DEBIAN/postinst" <<EOF
+
+if [ "\$1" = configure ]; then
+    for f in$secret_confs; do
+        if [ -f "\$f" ] && ! dpkg-statoverride --list "\$f" >/dev/null 2>&1; then
+            chown root:$user "\$f"
+            chmod 0640 "\$f"
+        fi
+    done
+fi
+EOF
+    fi
     if [ "$pkg" = pubsec-dashboard ]; then
         cat >>"$d/DEBIAN/postinst" <<'EOF'
 if [ "$1" = configure ]; then
@@ -359,7 +384,7 @@ pack
 # ------------------------------------------------------------ pubsec-statsd
 begin_pkg pubsec-statsd
 add_bin pubsec-statsd
-add_conf "$root/crates/pubsec-statsd/pubsec-statsd.example.toml" \
+add_secret_conf "$root/crates/pubsec-statsd/pubsec-statsd.example.toml" \
     /etc/pubsec-statsd/config.toml
 add_unit pubsec-statsd.service enable
 PKG_DESC="public statistics page for an AP-TI hub"
@@ -373,7 +398,7 @@ pack
 # --------------------------------------------------------- pubsec-allowlist
 begin_pkg pubsec-allowlist
 add_bin pubsec-allowlist
-add_conf "$root/crates/pubsec-allowlist/pubsec-allowlist.example.toml" \
+add_secret_conf "$root/crates/pubsec-allowlist/pubsec-allowlist.example.toml" \
     /etc/pubsec-allowlist/config.toml
 add_unit pubsec-allowlist.service enable
 PKG_DESC="allowlist sync for pubsecd"
@@ -386,7 +411,7 @@ pack
 # --------------------------------------------------------- pubsec-dashboard
 begin_pkg pubsec-dashboard
 add_bin pubsec-dashboard
-add_conf "$root/crates/pubsec-dashboard/pubsec-dashboard.example.toml" \
+add_secret_conf "$root/crates/pubsec-dashboard/pubsec-dashboard.example.toml" \
     /etc/pubsec-dashboard/config.toml
 add_unit pubsec-dashboard.service
 add_unit pubsec-dashboard.timer enable

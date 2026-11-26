@@ -256,6 +256,27 @@ for g in _rspamd rspamd; do
         break
     fi
 done
+
+# Succeeds if Rspamd accepts its configuration as a whole.
+pubsec_rspamd_test() {
+    command -v rspamadm >/dev/null 2>&1 || return 0
+    rspamadm configtest >/dev/null 2>&1
+}
+
+# Rspamd is reloaded below. With a configuration it rejects it would not come
+# up again and mail would no longer be scanned, so test the configuration
+# before and after the changes made here and take them back if they broke it.
+rspamd_ok_before=
+if pubsec_rspamd_test; then
+    rspamd_ok_before=1
+fi
+secret_backup=
+if [ -f "$PUBSEC_RSPAMD_SECRET" ]; then
+    secret_backup=$(mktemp /etc/rspamd/local.d/.pubsec_secret.XXXXXX)
+    cp -p "$PUBSEC_RSPAMD_SECRET" "$secret_backup"
+fi
+stub_created=
+stub_removed=
 install -d -m 0755 /etc/rspamd/local.d
 new=$(mktemp /etc/rspamd/local.d/.pubsec_secret.XXXXXX)
 {
@@ -290,9 +311,43 @@ if [ -n "$maps" ]; then
     if [ ! -e "$PUBSEC_MULTIMAP" ]; then
         pubsec_multimap_stub >"$PUBSEC_MULTIMAP"
         chmod 0644 "$PUBSEC_MULTIMAP"
+        stub_created=1
     fi
 elif pubsec_multimap_is_stub "$PUBSEC_MULTIMAP"; then
     rm -f "$PUBSEC_MULTIMAP"
+    stub_removed=1
+fi
+
+rspamd_ok=
+if pubsec_rspamd_test; then
+    rspamd_ok=1
+elif [ -n "$rspamd_ok_before" ]; then
+    if [ -n "$secret_backup" ]; then
+        cp -p "$secret_backup" "$PUBSEC_RSPAMD_SECRET"
+    else
+        rm -f "$PUBSEC_RSPAMD_SECRET"
+    fi
+    if [ -n "$stub_created" ]; then
+        rm -f "$PUBSEC_MULTIMAP"
+    elif [ -n "$stub_removed" ]; then
+        pubsec_multimap_stub >"$PUBSEC_MULTIMAP"
+        chmod 0644 "$PUBSEC_MULTIMAP"
+    fi
+    cat >&2 <<'EOF'
+pubsec-rspamd: "rspamadm configtest" rejects the Rspamd configuration with
+the changes of this package, so they were taken back and Rspamd was not
+reloaded. Run "rspamadm configtest" to see the error, fix it, then run
+"dpkg-reconfigure pubsec-rspamd".
+EOF
+else
+    cat >&2 <<'EOF'
+pubsec-rspamd: "rspamadm configtest" reports an invalid Rspamd configuration,
+so Rspamd was not reloaded. Fix the configuration, then run
+"systemctl reload rspamd".
+EOF
+fi
+if [ -n "$secret_backup" ]; then
+    rm -f "$secret_backup"
 fi
 
 # Keep the tokens out of the debconf database, but leave the questions
@@ -300,6 +355,7 @@ fi
 db_set pubsec-rspamd/push-token ""
 db_set pubsec-rspamd/read-token ""
 
-if [ -d /run/systemd/system ] && systemctl is-enabled rspamd.service >/dev/null 2>&1; then
+if [ -n "$rspamd_ok" ] && [ -d /run/systemd/system ] &&
+    systemctl is-enabled rspamd.service >/dev/null 2>&1; then
     deb-systemd-invoke try-reload-or-restart rspamd.service >/dev/null || true
 fi
