@@ -26,6 +26,12 @@ pub struct BanEvent {
     pub ip: String,
 }
 
+/// fail2ban's `recidive` jail bans IPs that other jails banned repeatedly,
+/// including the jails fed by `pull`. Its bans are never own observations:
+/// reporting them would re-publish peers' evidence as own Sightings, so the
+/// jail is skipped even when it is not listed in `ignore_jails`.
+pub const RECIDIVE: &str = "recidive";
+
 fn line_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -69,7 +75,7 @@ pub fn to_observation(ev: &BanEvent, cfg: &Push) -> Option<Value> {
         Action::RestoreBan if cfg.report_restored => {}
         Action::RestoreBan | Action::Unban => return None,
     }
-    if cfg.ignore_jails.contains(&ev.jail) {
+    if cfg.ignore_jails.contains(&ev.jail) || ev.jail == RECIDIVE {
         return None;
     }
     let (behavior, port, service) = match cfg.jails.get(&ev.jail) {
@@ -208,6 +214,10 @@ mod tests {
         let mut cfg = cfg;
         cfg.report_restored = true;
         cfg.default_behavior = Some("other".into());
+        assert!(
+            to_observation(&ev("recidive", Action::Ban), &cfg).is_none(),
+            "recidive is never reported, not even through default_behavior"
+        );
         assert!(to_observation(&ev("sshd", Action::RestoreBan), &cfg).is_some());
         assert_eq!(
             to_observation(&ev("nginx-http-auth", Action::Ban), &cfg).unwrap()["behavior"],

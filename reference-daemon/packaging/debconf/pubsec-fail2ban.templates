@@ -31,6 +31,11 @@ Description: Ban all active IPs from the pubsecd active list?
  file that a dedicated fail2ban jail follows, so that threats reported by your
  peers are blocked locally before they reach this host.
  .
+ The jail blocks all ports for every listed address and prefix, whatever it
+ was listed for. Put your own networks into "ignoreip" of
+ /etc/fail2ban/jail.d/pubsecd-ban.local and into the pubsecd allowlist so
+ that they can never be locked out.
+ .
  Declining leaves the local jails reporting to pubsecd without importing any
  bans from it.
 

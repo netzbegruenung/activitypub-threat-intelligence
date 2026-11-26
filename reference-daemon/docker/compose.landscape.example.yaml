@@ -6,6 +6,10 @@
 # volume is mounted read-only into the fail2ban container, and a jail in
 # fail2ban/jail.d/ follows the file. Replace the services below by your own;
 # only the volume wiring matters.
+#
+# Traffic to published container ports is forwarded by the host, so the jails
+# for these services must ban on the forward hook and name the container port:
+# see fail2ban/jail.d/landscape.local.example.
 services:
   apache:
     image: httpd:2.4-alpine

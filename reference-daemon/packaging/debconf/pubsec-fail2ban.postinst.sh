@@ -34,7 +34,13 @@ read_token=$RET
 db_get pubsec-fail2ban/ban-active
 ban_active=$RET
 db_get pubsec-fail2ban/integrations
-integrations=$(printf '%s' "$RET" | tr -d ' ' | tr ',' ' ')
+# recidive is never reported (see the config script); drop it from answers
+# given to versions that still offered it.
+integrations=
+for jail in $(printf '%s' "$RET" | tr -d ' ' | tr ',' ' '); do
+    [ "$jail" != recidive ] || continue
+    integrations="${integrations:+$integrations }$jail"
+done
 
 # The tokens are cleared from the debconf database once written, so on a plain
 # upgrade the answers are empty. Carry the installed values over, otherwise
@@ -76,8 +82,9 @@ state_file = "/var/lib/pubsec-fail2ban/push.state"
 batch_interval_secs = 30
 poll_interval_ms = 1000
 # Never report the jail fed by "pull", otherwise bans imported from peers are
-# re-published as your own sightings (feedback loop).
-ignore_jails = ["pubsecd-ban"]
+# re-published as your own sightings (feedback loop). The same goes for
+# recidive, which re-bans what other jails banned.
+ignore_jails = ["pubsecd-ban", "recidive"]
 report_restored = false
 max_queue = 10000
 EOF
@@ -111,7 +118,12 @@ refresh_secs = 1800
 EOF
         printf 'path = "%s"\n' "$PUBSEC_BAN_LOG"
         cat <<'EOF'
-# Empty = all behaviours.
+# Empty = all behaviours. The pubsecd-ban jail blocks all ports, so with this
+# an address listed for any behaviour (e.g. smtp-spam) loses access to every
+# service of this host. Narrow it down if that is too broad, for example:
+# behaviors = ["ssh-bruteforce", "auth-bruteforce", "scan", "exploit-attempt"]
+# Protect your own networks with `ignoreip` in
+# /etc/fail2ban/jail.d/pubsecd-ban.local and with the pubsecd allowlist.
 behaviors = []
 types = ["ipv4-addr", "ipv6-addr"]
 max_size_bytes = 10485760
@@ -133,28 +145,85 @@ tokens are still missing). Edit /etc/pubsec-fail2ban/config.toml or run
 EOF
 fi
 
+# Succeeds if fail2ban accepts its configuration as a whole.
+pubsec_f2b_test() {
+    command -v fail2ban-client >/dev/null 2>&1 || return 0
+    fail2ban-client -t >/dev/null 2>&1
+}
+
+# A jail whose log file is missing (e.g. an nginx jail on a host without nginx)
+# makes fail2ban reject its whole configuration: it keeps running until the
+# next restart and then does not come up again, leaving the host without any
+# bans. So test the configuration before and after adding jails, and take the
+# added ones back if they broke it.
+f2b_ok_before=
+if pubsec_f2b_test; then
+    f2b_ok_before=1
+fi
+
 jails=$integrations
 if [ "$ban_active" = true ]; then
-    jails="$jails pubsecd-ban"
+    # pubsec-recidive keeps the recidive jail away from the imported bans.
+    jails="$jails pubsecd-ban pubsec-recidive"
     # fail2ban aborts its configuration when a jail's logpath is missing, and
     # the file is only written by the first `pull` run, so create it empty.
     if [ ! -e "$PUBSEC_BAN_LOG" ]; then
         install -m 0640 -o pubsec-fail2ban -g adm /dev/null "$PUBSEC_BAN_LOG"
     fi
 fi
+installed=
 for jail in $jails; do
     tpl=/usr/share/pubsec-fail2ban/jail.d/$jail.local
     dst=/etc/fail2ban/jail.d/$jail.local
     if [ -f "$tpl" ] && [ ! -e "$dst" ]; then
         install -m 0644 "$tpl" "$dst"
+        installed="$installed $jail"
     fi
 done
+
+f2b_ok=
+if pubsec_f2b_test; then
+    f2b_ok=1
+elif [ -n "$f2b_ok_before" ] && [ -n "$installed" ]; then
+    # Find the jails that break the configuration: take all new ones out, then
+    # add them back one at a time.
+    for jail in $installed; do
+        rm -f "/etc/fail2ban/jail.d/$jail.local"
+    done
+    broken=
+    for jail in $installed; do
+        install -m 0644 "/usr/share/pubsec-fail2ban/jail.d/$jail.local" \
+            "/etc/fail2ban/jail.d/$jail.local"
+        if ! pubsec_f2b_test; then
+            rm -f "/etc/fail2ban/jail.d/$jail.local"
+            broken="$broken $jail"
+        fi
+    done
+    cat >&2 <<EOF
+pubsec-fail2ban: fail2ban rejects its configuration with these jails, so they
+were not installed:$broken
+Most likely the log file they read does not exist on this host. To retry, copy
+a jail from /usr/share/pubsec-fail2ban/jail.d to /etc/fail2ban/jail.d and check
+it with "fail2ban-client -t".
+EOF
+    if pubsec_f2b_test; then
+        f2b_ok=1
+    fi
+fi
+if [ -z "$f2b_ok" ]; then
+    cat >&2 <<'EOF'
+pubsec-fail2ban: "fail2ban-client -t" reports an invalid fail2ban
+configuration, so fail2ban was not reloaded. Fix the configuration, then run
+"systemctl reload fail2ban".
+EOF
+fi
 
 # Keep the tokens out of the debconf database, but leave the questions
 # registered so dpkg-reconfigure can ask for them again.
 db_set pubsec-fail2ban/push-token ""
 db_set pubsec-fail2ban/read-token ""
 
-if [ -d /run/systemd/system ] && systemctl is-enabled fail2ban.service >/dev/null 2>&1; then
+if [ -n "$f2b_ok" ] && [ -d /run/systemd/system ] &&
+    systemctl is-enabled fail2ban.service >/dev/null 2>&1; then
     deb-systemd-invoke try-reload-or-restart fail2ban.service >/dev/null || true
 fi

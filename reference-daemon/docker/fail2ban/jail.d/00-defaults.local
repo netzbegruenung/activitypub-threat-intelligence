@@ -1,5 +1,9 @@
 [DEFAULT]
-# nftables on the host (the container shares the host network).
+# nftables on the host (the container shares the host network). These actions
+# hook into "input", so they protect services of the host itself. Traffic to
+# published ports of other containers is forwarded and never passes "input":
+# jails for container services need the forward hook, see
+# landscape.local.example.
 banaction = nftables
 banaction_allports = nftables[type=allports]
 # Container log volumes are not reliably watched by inotify.

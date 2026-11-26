@@ -1,0 +1,12 @@
+# Keep the recidive jail away from bans imported by the pubsecd-ban jail.
+#
+# recidive bans every IP that other jails banned repeatedly, for a week by
+# default. Without this, an entry that peers list several times a day would be
+# banned far beyond its effective expiry in pubsecd, and, if recidive were
+# reported, re-published as an own sighting (feedback loop).
+#
+# This only adds an option to the [recidive] section; it does not enable the
+# jail. If your pull jail has another name, change the name below.
+
+[recidive]
+ignoreregex = \[pubsecd-ban\]\s+Ban\s
