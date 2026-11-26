@@ -1474,15 +1474,24 @@ async fn spawn_open_node(dir: &Path, name: &str) -> Daemon {
     spawn_node_with(dir, name, false).await
 }
 
+/// Each node gets a loopback address of its own. Hub mode trusts one
+/// operator per registrable domain (for an IP literal, the address), so
+/// nodes sharing 127.0.0.1 would count as one party.
 async fn spawn_node_with(dir: &Path, name: &str, manual: bool) -> Daemon {
-    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    static NEXT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    spawn_node_on(dir, name, manual, &format!("127.0.1.{n}")).await
+}
+
+async fn spawn_node_on(dir: &Path, name: &str, manual: bool, ip: &str) -> Daemon {
+    let public = TcpListener::bind(format!("{ip}:0")).await.unwrap();
     let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = public.local_addr().unwrap().port();
     let d = dir.join(name);
     let cfg = format!(
         r#"
 [instance]
-base_url = "http://127.0.0.1:{port}"
+base_url = "http://{ip}:{port}"
 organization = "Node {name}"
 [storage]
 database = "{db}"
@@ -1840,4 +1849,303 @@ async fn hub_mode_manual_approval() {
     .await;
     h.shutdown();
     n.shutdown();
+}
+
+/// Follow `target` from `from` and approve the request at `target`.
+async fn follow_and_approve(from: &Daemon, target: &Daemon) {
+    let (from_actor, target_actor) = (
+        from.state.urls.actor.clone(),
+        target.state.urls.actor.clone(),
+    );
+    ctl_ok(
+        from,
+        Request::Follow {
+            handle: target_actor.clone(),
+        },
+    )
+    .await;
+    wait_for("follow request", || async {
+        match ctl(target, Request::ListFollowers).await {
+            Reply::Followers(f) => f.iter().any(|f| f.actor == from_actor).then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+    ctl_ok(
+        target,
+        Request::ApproveFollower {
+            actor: from_actor.clone(),
+        },
+    )
+    .await;
+    wait_for("accepted follow", || async {
+        match ctl(from, Request::ListFollowing).await {
+            Reply::Following(f) => f
+                .iter()
+                .any(|f| f.actor == target_actor && f.state == "accepted")
+                .then_some(()),
+            _ => None,
+        }
+    })
+    .await;
+}
+
+async fn count(d: &Daemon, sql: &'static str) -> i64 {
+    d.state
+        .db
+        .call(move |c| Ok(c.query_row(sql, [], |r| r.get(0))?))
+        .await
+        .unwrap()
+}
+
+/// A request a peer signed for another server must not authenticate here:
+/// the signature covers `Host`, and `Host` has to be ours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signature_is_bound_to_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = spawn(dir.path(), "a").await;
+    let b = spawn(dir.path(), "b").await;
+    push(
+        &a,
+        PUSH,
+        json!({"value": "45.13.7.9", "behavior": "ssh-bruteforce"}),
+    )
+    .await;
+    publish::run_batch(&a.state).await.unwrap();
+    follow_and_approve(&b, &a).await;
+
+    let fetch = |host: String| {
+        let url = format!("http://{host}/actor/active?page=true");
+        let signed = pubsecd::httpsig::sign_request(
+            &b.state.keys,
+            &b.state.urls.key_id,
+            "GET",
+            &url.parse().unwrap(),
+            None,
+        );
+        let mut req = reqwest::Client::new()
+            .get(format!("http://{}/actor/active?page=true", a.public_addr))
+            .header("host", host);
+        for (k, v) in signed {
+            req = req.header(k, v);
+        }
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.text().await.unwrap())
+        }
+    };
+    // Signed for A: B is a follower and sees the GREEN Sighting.
+    let (status, body) = fetch(a.public_addr.to_string()).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("45.13.7.9"), "{body}");
+    // Signed for another server and replayed against A.
+    let (status, body) = fetch("attacker.example".into()).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(!body.contains("45.13.7.9"), "{body}");
+}
+
+/// Read-only tokens see published allowlist entries up to their `max_tlp`
+/// and never the internal `source`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rest_allowlist_tlp() {
+    use reqwest::Method;
+    let dir = tempfile::tempdir().unwrap();
+    let d = spawn(dir.path(), "a").await;
+    let (s, amber) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ADMIN,
+        Some(
+            json!({"value": "45.13.7.9", "scope": "published", "tlp": "amber",
+                    "summary": "partner scanner", "source": "cmdb"}),
+        ),
+    )
+    .await;
+    assert_eq!(s, 201, "{amber}");
+    let (s, local) = api(
+        &d,
+        Method::POST,
+        "/api/v1/allowlist",
+        ALLOW,
+        Some(json!({"value": "45.13.7.10", "source": "cmdb"})),
+    )
+    .await;
+    assert_eq!(s, 201, "{local}");
+    let amber_path = format!("/api/v1/allowlist/{}", amber["id"]);
+
+    // max_tlp clear: the AMBER entry is hidden, the local one has no source.
+    let (s, list) = api(&d, Method::GET, "/api/v1/allowlist", READ_CLEAR, None).await;
+    assert_eq!(s, 200);
+    let list = list.as_array().unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0]["observableValue"], "45.13.7.10");
+    assert!(list[0].get("source").is_none(), "{list:?}");
+    let (s, _) = api(&d, Method::GET, &amber_path, READ_CLEAR, None).await;
+    assert_eq!(s, 404);
+
+    // max_tlp amber: visible, still without source.
+    let (s, list) = api(&d, Method::GET, "/api/v1/allowlist", READ, None).await;
+    assert_eq!(s, 200);
+    assert_eq!(list.as_array().unwrap().len(), 2, "{list}");
+    let (s, e) = api(&d, Method::GET, &amber_path, READ, None).await;
+    assert_eq!(s, 200);
+    assert_eq!(e["summary"], "partner scanner");
+    assert!(e.get("source").is_none(), "{e}");
+
+    // The `allowlist` scope manages the list and sees all of it.
+    let (s, e) = api(&d, Method::GET, &amber_path, ALLOW, None).await;
+    assert_eq!(s, 200);
+    assert_eq!(e["source"], "cmdb");
+}
+
+/// Actors we have no relationship with leave nothing behind and cannot make
+/// us fetch from our peers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn strangers_leave_no_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = spawn(dir.path(), "a").await;
+    let b = spawn(dir.path(), "b").await; // peer A follows
+    let c = spawn(dir.path(), "c").await; // stranger
+    push(
+        &b,
+        PUSH,
+        json!({"value": "45.13.7.9", "behavior": "scan", "tlp": "clear"}),
+    )
+    .await;
+    publish::run_batch(&b.state).await.unwrap();
+    follow_and_approve(&a, &b).await;
+    let object_id: String = b
+        .state
+        .db
+        .call(|c| Ok(c.query_row("SELECT id FROM evidence WHERE local = 1", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    // Let A's first sync finish, then forget the object so a fetch shows.
+    wait_for("synced sighting at A", || async {
+        (count(&a, "SELECT COUNT(*) FROM evidence").await == 1).then_some(())
+    })
+    .await;
+    let _sync = a
+        .state
+        .db
+        .call(|c| Ok(c.execute("DELETE FROM evidence", [])?))
+        .await;
+
+    // An unverifiable request naming C's key costs a fetch but stores nothing.
+    let r = reqwest::Client::new()
+        .get(format!("http://{}/actor/active", a.public_addr))
+        .header("date", httpdate_now())
+        .header(
+            "signature",
+            format!(
+                r#"keyId="{}",headers="(request-target) host date",signature="AAAA""#,
+                c.state.urls.key_id
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let stored = |d: &Daemon, actor: String| {
+        let db = d.state.db.clone();
+        async move {
+            db.call(move |c| Ok(db::get_remote_actor(c, &actor)?.is_some()))
+                .await
+                .unwrap()
+        }
+    };
+    assert!(!stored(&a, c.state.urls.actor.clone()).await);
+
+    // Correctly signed activities from the stranger: acknowledged, ignored.
+    let processed = count(&a, "SELECT COUNT(*) FROM processed_activities").await;
+    for kind in ["Announce", "Create", "Like"] {
+        let activity = json!({
+            "type": kind,
+            "id": c.state.urls.new_activity_id(),
+            "actor": c.state.urls.actor,
+            "object": object_id,
+        });
+        pubsecd::client::signed_post(&c.state, &a.state.urls.inbox, &activity)
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        count(&a, "SELECT COUNT(*) FROM processed_activities").await,
+        processed
+    );
+    assert_eq!(count(&a, "SELECT COUNT(*) FROM evidence").await, 0);
+    // The signature was valid, so the actor itself is cached now.
+    assert!(stored(&a, c.state.urls.actor.clone()).await);
+
+    // Over-long activity ids are refused.
+    let long = json!({
+        "type": "Follow",
+        "id": format!("{}/{}", c.state.urls.new_activity_id(), "x".repeat(3000)),
+        "actor": c.state.urls.actor,
+        "object": a.state.urls.actor,
+    });
+    let err = pubsecd::client::signed_post(&c.state, &a.state.urls.inbox, &long)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("400"), "{err:#}");
+    assert_eq!(count(&a, "SELECT COUNT(*) FROM followers").await, 0);
+
+    // The same Announce from the followed peer is re-fetched and ingested.
+    let activity = json!({
+        "type": "Announce",
+        "id": b.state.urls.new_activity_id(),
+        "actor": b.state.urls.actor,
+        "object": object_id,
+    });
+    pubsecd::client::signed_post(&b.state, &a.state.urls.inbox, &activity)
+        .await
+        .unwrap();
+    wait_for("announced object at A", || async {
+        (count(&a, "SELECT COUNT(*) FROM evidence").await == 1).then_some(())
+    })
+    .await;
+}
+
+fn httpdate_now() -> String {
+    chrono::Utc::now()
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
+}
+
+/// Hub mode: nodes on one registrable domain can name as many operators as
+/// they like, but only one of them is trusted automatically.
+#[tokio::test]
+async fn hub_trusts_one_operator_per_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = spawn_hub(dir.path(), "hub").await;
+    let n1 = spawn_node_on(dir.path(), "n1", false, "127.0.2.1").await;
+    let n2 = spawn_node_on(dir.path(), "n2", false, "127.0.2.1").await;
+    let n3 = spawn_node_on(dir.path(), "n3", false, "127.0.2.2").await;
+    for n in [&n1, &n2, &n3] {
+        let actor = n.state.urls.actor.clone();
+        ctl_ok(
+            n,
+            Request::Follow {
+                handle: format!("feed@127.0.0.1:{}", h.public_addr.port()),
+            },
+        )
+        .await;
+        wait_for("hub follows the node back", || async {
+            match ctl(&h, Request::ListFollowing).await {
+                Reply::Following(f) => f.iter().any(|f| f.actor == actor).then_some(()),
+                _ => None,
+            }
+        })
+        .await;
+        // The follow-back holds this lock until trust is decided.
+        drop(h.state.hub_lock.lock().await);
+    }
+    assert!(operator_policy(&h, &n1.state.urls.org).await.is_some());
+    assert!(
+        operator_policy(&h, &n2.state.urls.org).await.is_none(),
+        "second operator on the same address must not be trusted automatically"
+    );
+    assert!(operator_policy(&h, &n3.state.urls.org).await.is_some());
 }

@@ -539,6 +539,15 @@ pub fn insert_auto_operator_policy(
     Ok(n > 0)
 }
 
+/// Hub mode: operators whose policy was added automatically.
+pub fn list_auto_operators(c: &Connection) -> anyhow::Result<Vec<String>> {
+    let mut stmt = c.prepare("SELECT DISTINCT operator FROM operator_policy WHERE auto = 1")?;
+    let rows = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
 /// Hub mode: remove the automatic policy of `operator`, if any. Policies set
 /// by an administrator are kept.
 pub fn delete_auto_operator_policy(c: &Connection, operator: &str) -> anyhow::Result<bool> {
@@ -825,6 +834,14 @@ pub fn list_followers(c: &Connection) -> anyhow::Result<Vec<FollowerInfo>> {
         })?
         .collect::<Result<_, _>>()?;
     Ok(rows)
+}
+
+pub fn count_pending_followers(c: &Connection) -> anyhow::Result<u64> {
+    Ok(c.query_row(
+        "SELECT COUNT(*) FROM followers WHERE state = 'pending'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? as u64)
 }
 
 pub fn accepted_followers(c: &Connection) -> anyhow::Result<Vec<String>> {
